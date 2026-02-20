@@ -16,14 +16,7 @@ Games boot with real BIOS, render via WebGL2, and play with full audio.
   <img src="screenshots/shenmue.png" width="32%" alt="Shenmue">
 </p>
 
-| Game | Performance | Notes |
-|------|-------------|-------|
-| 18 Wheeler | Near-perfect | Arcade-style, GPU-heavy |
-| Jet Set Radio | Playable | Lower FPS, perfect audio |
-| Dave Mirra Freestyle BMX | Playable | Fixed via texParameter patch |
-| FMV-heavy intros | Slow | Software MPEG decode bottleneck |
-
-Performance is limited by the SH4 interpreter (no dynarec in WASM). GPU-heavy games run well; CPU-heavy tasks (FMV, complex game logic) are the bottleneck. See [PERFORMANCE.md](PERFORMANCE.md) for the optimization roadmap.
+Performance is limited by the SH4 interpreter (no dynarec in WASM). See [PERFORMANCE.md](PERFORMANCE.md) for the optimization roadmap.
 
 ## Why This Exists
 
