@@ -47,7 +47,7 @@ git clone https://github.com/libretro/flycast.git ~/flycast-wasm/flycast
 cd ~/flycast-wasm/flycast
 
 # Patch (6 source patches across 5 files)
-git apply /path/to/patches/flycast-all-changes.patch
+git apply ../patches/flycast-all-changes.patch
 
 # Build (~2 min)
 emmake make -f Makefile platform=emscripten -j$(nproc)
@@ -88,6 +88,9 @@ flycast-wasm/
 │   ├── gles-force-gles3.patch          # Individual: gles.cpp GLES3 force
 │   ├── gl_override.js                  # Emscripten JS library override
 │   └── webgl2-compat.js               # Runtime WebGL2 compatibility patches
+├── stubs/
+│   ├── flycast_stubs.c                 # WASM signature mismatch stubs (C)
+│   └── flycast_stubs_cpp.cpp           # Dynarec no-op stub (C++)
 ├── build/
 │   └── link.sh                         # Emscripten link script
 └── config/

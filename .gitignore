@@ -3,9 +3,10 @@ build/flycast_libretro_emscripten.a
 build/flycast_stubs.o
 build/flycast_stubs_cpp.o
 build/gles_patched.o
-dist/flycast_libretro.js
-dist/flycast_libretro.wasm
-dist/flycast-wasm.7z
+dist/
+
+# Node
+node_modules/
 
 # OS
 .DS_Store
