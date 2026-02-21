@@ -176,6 +176,18 @@ index 6ea5355..8e25ad1 100755
  	#define HOST_CPU CPU_X64
  #elif defined(__i386__) || defined(_M_IX86)
  	#define HOST_CPU CPU_X86
+diff --git a/core/deps/DreamPicoPort-API b/core/deps/DreamPicoPort-API
+--- a/core/deps/DreamPicoPort-API
++++ b/core/deps/DreamPicoPort-API
+@@ -1 +1 @@
+-Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8
++Subproject commit e06d9f6c59833fc7bb7f2a33c960614489811ef8-dirty
+diff --git a/core/deps/SDL b/core/deps/SDL
+--- a/core/deps/SDL
++++ b/core/deps/SDL
+@@ -1 +1 @@
+-Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d
++Subproject commit 00d4f1c2c4ad2dc95d26b18743541f57b1dca56d-dirty
 diff --git a/core/hw/mem/addrspace.cpp b/core/hw/mem/addrspace.cpp
 index c08cb8e..fd1756b 100644
 --- a/core/hw/mem/addrspace.cpp

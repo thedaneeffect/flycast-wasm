@@ -94,6 +94,11 @@ static inline void emitStoreRdF32(WasmModuleBuilder& b, const shil_param& rd) {
 // ============================================================
 static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
                         RuntimeBlockInfo* block, u32 opIndex) {
+	// DIAGNOSTIC: Force all ops to use SHIL fallback handler
+	// If BIOS renders with this, the bug is in a WASM emitter.
+	// If still black, bug is in block exit / prologue.
+	return false;
+	(void)b; (void)op; (void)block; (void)opIndex;
 	switch (op.op) {
 
 	// ---- Tier 1: Integer ALU ----
@@ -630,16 +635,11 @@ static void emitBlockExit(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 		break;
 
 	case BET_CLS_Dynamic:
-		// ctx.pc = ctx.jdyn (for Jump/Call) or ctx.pr (for Ret)
+		// ctx.pc = ctx.jdyn — all dynamic exits use jdyn
+		// (shop_jdyn already stored the target, even for RTS which copies PR→jdyn)
 		b.op_local_get(LOCAL_CTX);
 		b.op_local_get(LOCAL_CTX);
-		if (block->BlockType == BET_DynamicRet) {
-			// pr register
-			b.op_i32_load(getRegOffset(reg_pr));
-		} else {
-			// jdyn
-			b.op_i32_load(ctx_off::JDYN);
-		}
+		b.op_i32_load(ctx_off::JDYN);
 		b.op_i32_store(ctx_off::PC);
 		break;
 
