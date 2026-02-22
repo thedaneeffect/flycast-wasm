@@ -546,19 +546,14 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 	case shop_ifb: {
 		if (op.rs1._imm)
 			ctx.pc = op.rs2._imm;
-		// Let OpPtr modify cycle_counter naturally during block execution.
-		// Timing-dependent hardware register reads (e.g. RTC at 0xFFD8xxxx)
-		// need to see correct intermediate cycle_counter values.
-		// cycle_counter is forced back to the correct value at block end.
-		try {
-			if (ctx.sr.FD == 1 && OpDesc[op.rs3._imm]->IsFloatingPoint())
-				throw SH4ThrownException(ctx.pc - 2, Sh4Ex_FpuDisabled);
-			OpPtr[op.rs3._imm](&ctx, op.rs3._imm);
-		} catch (const SH4ThrownException& ex) {
-			g_ifb_exception_pending = true;
-			g_ifb_exception_epc = ex.epc;
-			g_ifb_exception_expEvn = ex.expEvn;
-		}
+		// Let exceptions propagate to mainloop (matching ref_execute_block behavior).
+		// In ref, exceptions from OpPtr propagate to the mainloop catch, which calls
+		// Do_Exception and adds +5 to cycle_counter. Deferred exception handling
+		// (g_ifb_exception_pending) caused behavioral differences because remaining
+		// SHIL ops continued executing after the exception.
+		if (ctx.sr.FD == 1 && OpDesc[op.rs3._imm]->IsFloatingPoint())
+			throw SH4ThrownException(ctx.pc - 2, Sh4Ex_FpuDisabled);
+		OpPtr[op.rs3._imm](&ctx, op.rs3._imm);
 		break;
 	}
 	case shop_swaplb: {
@@ -699,7 +694,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
