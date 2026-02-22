@@ -801,12 +801,13 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		EM_ASM({ console.log('[BLK] #' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
 			' cc=' + ($2|0) +
-			' go=' + $3 +
+			' go=' + $3 + ' gc=' + $7 +
 			' r0=0x' + ($4>>>0).toString(16) +
 			' r4=0x' + ($5>>>0).toString(16) +
 			' T=' + $6); },
 			g_wasm_block_count, block->vaddr, ctx.cycle_counter,
-			block->guest_opcodes, ctx.r[0], ctx.r[4], ctx.sr.T);
+			block->guest_opcodes, ctx.r[0], ctx.r[4], ctx.sr.T,
+			block->guest_cycles);
 	}
 #endif
 
