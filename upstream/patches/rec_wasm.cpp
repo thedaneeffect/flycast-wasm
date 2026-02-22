@@ -838,21 +838,6 @@ static u32 shadow_match_count = 0;
 static void cpp_execute_block(RuntimeBlockInfo* block) {
 	Sh4Context& ctx = Sh4cntx;
 
-#ifdef __EMSCRIPTEN__
-	// Per-block trace for first 500 blocks (compare between modes)
-	if (g_wasm_block_count < 500) {
-		EM_ASM({ console.log('[BLK] #' + $0 +
-			' pc=0x' + ($1>>>0).toString(16) +
-			' cc=' + ($2|0) +
-			' go=' + $3 + ' gc=' + $7 +
-			' r0=0x' + ($4>>>0).toString(16) +
-			' r4=0x' + ($5>>>0).toString(16) +
-			' T=' + $6); },
-			g_wasm_block_count, block->vaddr, ctx.cycle_counter,
-			block->guest_opcodes, ctx.r[0], ctx.r[4], ctx.sr.T,
-			block->guest_cycles);
-	}
-#endif
 
 #if EXECUTOR_MODE == 0
 	// REF executor (per-instruction charging)
@@ -1266,7 +1251,6 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	}
 #else
 	// SHIL executor — charge guest_cycles upfront, forced reset after.
-	// See FINDINGS comment in compile() for timing investigation results.
 	{
 		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
@@ -1274,17 +1258,6 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
-#ifdef __EMSCRIPTEN__
-		// Log r0 right after SHIL ops, before applyBlockExitCpp
-		if (g_wasm_block_count == 2360475) {
-			EM_ASM({ console.log('[SHIL-EXIT] blk=2360475' +
-				' vaddr=0x' + ($0>>>0).toString(16) +
-				' r0=0x' + ($1>>>0).toString(16) +
-				' pc=0x' + ($2>>>0).toString(16) +
-				' nops=' + $3); },
-				block->vaddr, ctx.r[0], ctx.pc, (u32)block->oplist.size());
-		}
-#endif
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
@@ -1293,183 +1266,8 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	}
 #endif
 
-#ifdef __EMSCRIPTEN__
-	// Track visits to the critical PCs where FB_R_CTRL writes happen
-	{
-		static u32 visits_da5a8 = 0;
-		static u32 visits_db58a = 0;
-		static u32 visits_da9e4 = 0;  // STARTRENDER PC
-		if (block->vaddr == 0x8c0da5a8) {
-			visits_da5a8++;
-			if (visits_da5a8 <= 10)
-				EM_ASM({ console.log('[KEY-PC] 0x8c0da5a8 visit #' + $0 +
-					' blk=' + $1 + ' r0=0x' + ($2>>>0).toString(16) +
-					' cc=' + ($3|0)); },
-					visits_da5a8, g_wasm_block_count, ctx.r[0], ctx.cycle_counter);
-		}
-		if (block->vaddr == 0x8c0db58a) {
-			visits_db58a++;
-			if (visits_db58a <= 20)
-				EM_ASM({ console.log('[KEY-PC] 0x8c0db58a visit #' + $0 +
-					' blk=' + $1 + ' r0=0x' + ($2>>>0).toString(16)); },
-					visits_db58a, g_wasm_block_count, ctx.r[0]);
-		}
-		if (block->vaddr == 0x8c0da9e4) {
-			visits_da9e4++;
-			if (visits_da9e4 <= 10)
-				EM_ASM({ console.log('[KEY-PC] 0x8c0da9e4 (STARTRENDER) visit #' + $0 +
-					' blk=' + $1); },
-					visits_da9e4, g_wasm_block_count);
-		}
-		// Summary at checkpoints
-		if (g_wasm_block_count % 5000000 == 0 && g_wasm_block_count > 0) {
-			EM_ASM({ console.log('[KEY-PC-SUM] blk=' + $0 +
-				' da5a8=' + $1 + ' db58a=' + $2 + ' da9e4=' + $3); },
-				g_wasm_block_count, visits_da5a8, visits_db58a, visits_da9e4);
-		}
-	}
-
-	// CC-SUMMARY for ALL modes
-	if (g_wasm_block_count == 100000 || g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 ||
-	    g_wasm_block_count == 2000000 || g_wasm_block_count == 2360000 || g_wasm_block_count == 2360114) {
-		EM_ASM({ console.log('[CC-SUMMARY] blk=' + $0 +
-			' cc=' + ($1|0) +
-			' mode=' + $2); },
-			g_wasm_block_count, ctx.cycle_counter, EXECUTOR_MODE);
-	}
-#if EXECUTOR_MODE == 5
-	if (g_wasm_block_count == 1000 || g_wasm_block_count == 10000 || g_wasm_block_count == 100000 ||
-	    g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 || g_wasm_block_count == 2000000) {
-		EM_ASM({ console.log('[SHADOW-SUM] at blk=' + $0 +
-			' match=' + $1 + ' mismatch=' + $2 +
-			' rate=' + (($1 > 0) ? (100.0 * $1 / ($1 + $2)).toFixed(2) : '0') + '%'); },
-			g_wasm_block_count, shadow_match_count, shadow_mismatch_count);
-	}
-#endif
-#if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5 || EXECUTOR_MODE == 1 || EXECUTOR_MODE == 3
-	if (g_wasm_block_count % 500000 == 0 && g_wasm_block_count > 0 && g_wasm_block_count <= 50000000) {
-		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
-			' reads=' + $1 + ' writes=' + $2 +
-			' pvr_wr=' + $3 + ' sq_wr=' + $4 +
-			' fb_calls=' + $5 + ' fb_miss=' + $6); },
-			g_wasm_block_count, g_shil_read_count, g_shil_write_count,
-			g_shil_pvr_write_count, g_shil_sq_write_count,
-			g_shil_fb_call_count, g_shil_fb_miss_count);
-
-		// Read PVR registers via BOTH paths: ReadMem and direct union
-		u32 fb_r_ctrl_mem = ReadMem32(0xA05F8044);
-		u32 fb_r_ctrl_union = FB_R_CTRL.full;
-		u32 fb_w_ctrl = FB_W_CTRL.full;
-		u32 spg_ctrl = SPG_CONTROL.full;
-		u32 fb_r_sof1 = FB_R_SOF1;
-		u32 fb_r_sof2 = FB_R_SOF2;
-		EM_ASM({ console.log('[PVR-REG] blk=' + $0 +
-			' FB_R_CTRL_mem=0x' + ($1>>>0).toString(16) +
-			' FB_R_CTRL_union=0x' + ($2>>>0).toString(16) +
-			' fb_enable=' + ($2 & 1) +
-			' FB_W_CTRL=0x' + ($3>>>0).toString(16) +
-			' SPG=0x' + ($4>>>0).toString(16) +
-			' SOF1=0x' + ($5>>>0).toString(16) +
-			' SOF2=0x' + ($6>>>0).toString(16)); },
-			g_wasm_block_count, fb_r_ctrl_mem, fb_r_ctrl_union,
-			fb_w_ctrl, spg_ctrl, fb_r_sof1, fb_r_sof2);
-		// Naomi serial EEPROM access counters
-		EM_ASM({ console.log('[NAOMI-ID] blk=' + $0 +
-			' boardWrites=' + $1 + ' boardReads=' + $2); },
-			g_wasm_block_count, g_naomi_board_write_count, g_naomi_board_read_count);
-	}
-	// Extra Naomi counter checkpoints around the switchover
-	if (g_wasm_block_count == 2360000 || g_wasm_block_count == 2361000 ||
-	    g_wasm_block_count == 2362000 || g_wasm_block_count == 2365000 ||
-	    g_wasm_block_count == 2370000 || g_wasm_block_count == 2380000 ||
-	    g_wasm_block_count == 2400000 || g_wasm_block_count == 3000000) {
-		EM_ASM({ console.log('[NAOMI-ID] blk=' + $0 +
-			' boardWrites=' + $1 + ' boardReads=' + $2); },
-			g_wasm_block_count, g_naomi_board_write_count, g_naomi_board_read_count);
-	}
-#endif
-#endif
 
 	g_wasm_block_count++;
-
-	// (post-execution diagnostic removed — no longer needed)
-
-	pc_hash = pc_hash * 1000003u + block->vaddr;
-
-	// State hash A: r[0..15] + pc + sr.T — MULTIPLICATIVE accumulation
-	u32 sh = 0;
-	for (int i = 0; i < 16; i++) sh = sh * 31u + ctx.r[i];
-	sh = sh * 31u + ctx.pc;
-	sh = sh * 31u + ctx.sr.T;
-	state_hash = state_hash * 1000003u + sh;
-
-	// State hash B: fr[0..15] + mac + pr + sr.status + fpscr + gbr
-	u32 sh2 = 0;
-	for (int i = 0; i < 16; i++) sh2 = sh2 * 31u + *(u32*)&ctx.fr[i];
-	sh2 = sh2 * 31u + ctx.mac.l;
-	sh2 = sh2 * 31u + ctx.mac.h;
-	sh2 = sh2 * 31u + ctx.pr;
-	sh2 = sh2 * 31u + ctx.sr.status;
-	sh2 = sh2 * 31u + ctx.fpscr.full;
-	sh2 = sh2 * 31u + ctx.gbr;
-	state_hash2 = state_hash2 * 1000003u + sh2;
-
-	// State hash C: xf[0..15] + r_bank[0..7] + fpul + vbr + ssr + spc + sgr + dbr
-	u32 sh3 = 0;
-	for (int i = 0; i < 16; i++) sh3 = sh3 * 31u + *(u32*)&ctx.xf[i];
-	for (int i = 0; i < 8; i++) sh3 = sh3 * 31u + ctx.r_bank[i];
-	sh3 = sh3 * 31u + ctx.fpul;
-	sh3 = sh3 * 31u + ctx.vbr;
-	sh3 = sh3 * 31u + ctx.ssr;
-	sh3 = sh3 * 31u + ctx.spc;
-	sh3 = sh3 * 31u + ctx.sgr;
-	sh3 = sh3 * 31u + ctx.dbr;
-	state_hash3 = state_hash3 * 1000003u + sh3;
-
-#ifdef __EMSCRIPTEN__
-	if (g_wasm_block_count % 100000 == 0 ||
-	    (g_wasm_block_count >= 2300000 && g_wasm_block_count <= 2400000 && g_wasm_block_count % 1000 == 0) ||
-	    (g_wasm_block_count >= 24100000 && g_wasm_block_count <= 24200000 && g_wasm_block_count % 1000 == 0)) {
-		EM_ASM({ console.log('[TRACE] blk=' + $0 +
-			' pc=0x' + ($1>>>0).toString(16) +
-			' hPC=0x' + ($2>>>0).toString(16) +
-			' hA=0x' + ($3>>>0).toString(16) +
-			' hB=0x' + ($4>>>0).toString(16) +
-			' hC=0x' + ($5>>>0).toString(16) +
-			' r0=0x' + ($6>>>0).toString(16) +
-			' T=' + $7); },
-			g_wasm_block_count, ctx.pc, pc_hash,
-			state_hash, state_hash2, state_hash3,
-			ctx.r[0], ctx.sr.T);
-		pc_hash = 0;
-		state_hash = 0;
-		state_hash2 = 0;
-		state_hash3 = 0;
-	}
-	// Per-block trace in the divergence range to find exact diverging block
-	if (g_wasm_block_count >= 2360000 && g_wasm_block_count < 2361000) {
-		// Hash ALL r[0..15] to find ANY register divergence
-		u32 rh = 0;
-		for (int i = 0; i < 16; i++) rh = rh * 31u + ctx.r[i];
-		// Read the value at the ACTUAL r0 pop address for the diverging block
-		// BLK-DETAIL #2360476: r15_end=0x8cffffc0, r0 popped from r15_end - 8
-		u32 stack_val = ReadMem32(0x8cffffb8);
-		EM_ASM({ console.log('[BLK-DETAIL] #' + $0 +
-			' pc=0x' + ($1>>>0).toString(16) +
-			' cc=' + ($2|0) +
-			' rH=0x' + ($3>>>0).toString(16) +
-			' stk=0x' + ($4>>>0).toString(16) +
-			' r0=0x' + ($5>>>0).toString(16) +
-			' r4=0x' + ($6>>>0).toString(16) +
-			' r15=0x' + ($7>>>0).toString(16) +
-			' T=' + $8 +
-			' pr=0x' + ($9>>>0).toString(16)); },
-			g_wasm_block_count, ctx.pc, ctx.cycle_counter,
-			rh, stack_val,
-			ctx.r[0], ctx.r[4], ctx.r[15],
-			ctx.sr.T, ctx.pr);
-	}
-#endif
 }
 
 // ============================================================
@@ -1640,27 +1438,6 @@ public:
 	{
 #ifdef __EMSCRIPTEN__
 		EM_ASM({ console.log('[rec_wasm] WasmDynarec::init() — Phase 2 WASM JIT'); });
-		EM_ASM({ console.log('[FINDINGS] SHIL executor timing investigation results:'); });
-		EM_ASM({ console.log('[FINDINGS] - Mode 0 (ref_execute_block + flat -1/instr) = PASS'); });
-		EM_ASM({ console.log('[FINDINGS] - Mode 1 (SHIL + guest_cycles) = FAIL_BLACK, diverges from mode 0 at ~3.2M blocks'); });
-		EM_ASM({ console.log('[FINDINGS] - Root cause: accumulated cycle_counter drift from different charging models'); });
-		EM_ASM({ console.log('[FINDINGS] - Mode 0 charges: flat -1/iteration + IReadMem16 cache penalties (sh4_cache.h)'); });
-		EM_ASM({ console.log('[FINDINGS] - Mode 1 charges: guest_cycles upfront (SH4 timing tables via countCycles)'); });
-		EM_ASM({ console.log('[FINDINGS] - guest_cycles != sum(flat -1) because different timing models'); });
-		EM_ASM({ console.log('[FINDINGS] - Upstream interpreter uses executeCycles(op) (per-instruction, varies by type)'); });
-		EM_ASM({ console.log('[FINDINGS] - Sh4Cycles class (sh4_cycles.h): executeCycles, addReadAccessCycles, addWriteAccessCycles'); });
-		EM_ASM({ console.log('[FINDINGS] - Timer reads (TMU TCNT0 at 0xFFD8000C) depend on cycle_counter via now()'); });
-		EM_ASM({ console.log('[FINDINGS] - Drift causes timer read divergence -> branch divergence -> fb_enable never set'); });
-		EM_ASM({ console.log('[FINDINGS] - ATTEMPTED FIXES (all worse than baseline):'); });
-		EM_ASM({ console.log('[FINDINGS]   1. guest_offs per-instruction charging: diverges at 2.5M (earlier!)'); });
-		EM_ASM({ console.log('[FINDINGS]   2. delay_slot-aware charging: same 2.5M divergence'); });
-		EM_ASM({ console.log('[FINDINGS]   3. guest_opcodes instead of guest_cycles: 2.5M divergence'); });
-		EM_ASM({ console.log('[FINDINGS]   4. No forced reset (natural penalties): 2.5M divergence'); });
-		EM_ASM({ console.log('[FINDINGS] - CONCLUSION: per-instruction charging adds error faster than it corrects.'); });
-		EM_ASM({ console.log('[FINDINGS]   The baseline guest_cycles model (3.2M divergence) is closest to working.'); });
-		EM_ASM({ console.log('[FINDINGS] - NEXT STEPS: need to either match ref_execute_block exactly (call'); });
-		EM_ASM({ console.log('[FINDINGS]   executeCycles per SH4 instruction) or find a way to make the BIOS'); });
-		EM_ASM({ console.log('[FINDINGS]   tolerate the timing drift (e.g., longer test, different BIOS version).'); });
 #endif
 		sh4ctx = &ctx;
 		codeBuffer = &buf;
@@ -1702,36 +1479,6 @@ public:
 				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
 				compiledCount, failCount, block->vaddr,
 				(int)block->oplist.size());
-		}
-		// Dump full oplist for the ACTUAL diverging block at PC 0x8c00b996
-		// (and 0x8c00b8e4 which is the epilogue that reads the different value)
-		if (block->vaddr == 0x8c00b996 || block->vaddr == 0x8c00b8e4) {
-			EM_ASM({ console.log('[OPLIST-DUMP] pc=0x8c00b8e4 nops=' + $0 +
-				' guest_cycles=' + $1 + ' guest_opcodes=' + $2 +
-				' bt=' + $3 + ' sh4_size=' + $4); },
-				(u32)block->oplist.size(), block->guest_cycles,
-				block->guest_opcodes, (int)block->BlockType,
-				block->sh4_code_size);
-			for (u32 i = 0; i < block->oplist.size(); i++) {
-				shil_opcode& sop = block->oplist[i];
-				u32 rd_off = sop.rd.is_reg() ? sop.rd.reg_offset() : 0xFFFF;
-				u32 rs1_info = sop.rs1.is_reg() ? sop.rs1.reg_offset() :
-				               (sop.rs1.is_imm() ? sop.rs1._imm : 0xDEAD);
-				u32 rs2_info = sop.rs2.is_reg() ? sop.rs2.reg_offset() :
-				               (sop.rs2.is_imm() ? sop.rs2._imm : 0xDEAD);
-				u32 rs3_info = sop.rs3.is_reg() ? sop.rs3.reg_offset() :
-				               (sop.rs3.is_imm() ? sop.rs3._imm : 0xDEAD);
-				EM_ASM({ console.log('[OPLIST] i=' + $0 +
-					' op=' + $1 + ' sz=' + $2 +
-					' rd=0x' + ($3>>>0).toString(16) +
-					' rs1=0x' + ($4>>>0).toString(16) +
-					' rs2=0x' + ($5>>>0).toString(16) +
-					' rs3=0x' + ($6>>>0).toString(16) +
-					' rs1_reg=' + $7 + ' rs1_imm=' + $8); },
-					i, (int)sop.op, (int)sop.size,
-					rd_off, rs1_info, rs2_info, rs3_info,
-					sop.rs1.is_reg() ? 1 : 0, sop.rs1.is_imm() ? 1 : 0);
-			}
 		}
 #endif
 	}
