@@ -12,17 +12,17 @@
  *   BIOS files in place for demo server
  *
  * Output:
- *   upstream/test-results.json   — structured result with pass/fail + diagnostics
- *   upstream/test-console.log    — full raw console output
- *   upstream/test-screenshot.png — screenshot after test duration
+ *   upstream/test-results.json   -structured result with pass/fail + diagnostics
+ *   upstream/test-console.log    -full raw console output
+ *   upstream/test-screenshot.png -screenshot after test duration
  *
  * Result statuses:
- *   PASS           — visual output detected, no crashes
- *   FAIL_CRASH     — runtime error or abort detected
- *   FAIL_BLACK     — no visual output (black screen)
- *   FAIL_NO_VISUAL — some pixels but no meaningful content (< threshold)
- *   FAIL_BEHAVIOR  — no crash but emulation behavior is broken (e.g. mainloop cycling)
- *   ERROR          — harness itself failed
+ *   PASS           -visual output detected, no crashes
+ *   FAIL_CRASH     -runtime error or abort detected
+ *   FAIL_BLACK     -no visual output (black screen)
+ *   FAIL_NO_VISUAL -some pixels but no meaningful content (< threshold)
+ *   FAIL_BEHAVIOR  -no crash but emulation behavior is broken (e.g. mainloop cycling)
+ *   ERROR          -harness itself failed
  */
 
 const { chromium } = require('playwright');
@@ -40,7 +40,7 @@ const TEST_DURATION_MS = 30000;
 const ROM_CLICK_TEXT = '18 Wheeler - American Pro Trucker (USA).chd';
 const OUTPUT_DIR = path.join(PROJECT_DIR, 'upstream');
 
-// Crash patterns — any of these in console = definitive crash
+// Crash patterns -any of these in console = definitive crash
 const CRASH_PATTERNS = [
   'Failed to start game',
   'missing function:',
@@ -82,7 +82,7 @@ async function startServer() {
 
     server.on('error', reject);
 
-    // Fallback — if no "listening" message, assume ready after 3 seconds
+    // Fallback -if no "listening" message, assume ready after 3 seconds
     setTimeout(() => {
       if (!started) {
         started = true;
@@ -94,15 +94,15 @@ async function startServer() {
 
 /**
  * Analyze a PNG screenshot for visual content.
- * Decodes actual pixel data — not compressed PNG bytes.
+ * Decodes actual pixel data -not compressed PNG bytes.
  *
  * Returns:
- *   totalPixels    — total pixel count
- *   nonBlackPixels — pixels where R+G+B > 30
- *   nonBlackRatio  — ratio of non-black pixels (0.0 - 1.0)
- *   uniqueColors   — count of distinct colors (quantized to 6-bit per channel)
- *   isBlack        — true if < BLACK_SCREEN_THRESHOLD non-black pixels
- *   hasVisual      — true if enough non-black pixels AND enough color diversity
+ *   totalPixels    -total pixel count
+ *   nonBlackPixels -pixels where R+G+B > 30
+ *   nonBlackRatio  -ratio of non-black pixels (0.0 - 1.0)
+ *   uniqueColors   -count of distinct colors (quantized to 6-bit per channel)
+ *   isBlack        -true if < BLACK_SCREEN_THRESHOLD non-black pixels
+ *   hasVisual      -true if enough non-black pixels AND enough color diversity
  */
 function analyzeScreenshot(screenshotPath) {
   const fileData = fs.readFileSync(screenshotPath);
@@ -151,10 +151,10 @@ function analyzeScreenshot(screenshotPath) {
  * Analyze console messages for behavioral problems beyond crashes.
  *
  * Returns:
- *   mainloopEntries  — how many times "Entering mainloop" appeared
- *   mainloopExits    — how many times "Exited mainloop" appeared
- *   isCycling        — true if mainloop entered too many times (broken dispatch)
- *   warnings         — array of warning strings for non-fatal issues
+ *   mainloopEntries  -how many times "Entering mainloop" appeared
+ *   mainloopExits    -how many times "Exited mainloop" appeared
+ *   isCycling        -true if mainloop entered too many times (broken dispatch)
+ *   warnings         -array of warning strings for non-fatal issues
  */
 function analyzeConsoleBehavior(messages) {
   const warnings = [];
@@ -170,7 +170,7 @@ function analyzeConsoleBehavior(messages) {
   // Check for WebGL errors that might prevent rendering
   const webglErrors = messages.filter(m => m.includes('WebGL:') && (m.includes('ERROR') || m.includes('INVALID')));
   if (webglErrors.length > 3) {
-    warnings.push(`${webglErrors.length} WebGL errors detected — rendering may be broken.`);
+    warnings.push(`${webglErrors.length} WebGL errors detected -rendering may be broken.`);
   }
 
   // Check for memory growth failures
@@ -183,7 +183,7 @@ function analyzeConsoleBehavior(messages) {
   if (mainloopEntries === 0) {
     const hasInit = messages.some(m => m.includes('Sh4Recompiler::Init') || m.includes('Entering mainloop'));
     if (!hasInit) {
-      warnings.push('Mainloop was never entered — emulation may not have started.');
+      warnings.push('Mainloop was never entered -emulation may not have started.');
     }
   }
 
@@ -207,7 +207,7 @@ async function runTest() {
   if (!fs.existsSync(contextPath)) {
     console.error('');
     console.error('==========================================================');
-    console.error(' TEST BLOCKED — missing upstream/test-context.json');
+    console.error(' TEST BLOCKED -missing upstream/test-context.json');
     console.error('==========================================================');
     console.error('');
     console.error(' Before running a test, create this file with:');
@@ -223,7 +223,7 @@ async function runTest() {
     console.error(' {');
     console.error('   "issue": "SHIL executor renders black screen instead of BIOS",');
     console.error('   "testing": "Charging guest_cycles before SHIL ops (like x64 JIT)",');
-    console.error('   "if_pass": "Cycle timing was the root cause — move to compiled WASM",');
+    console.error('   "if_pass": "Cycle timing was the root cause -move to compiled WASM",');
     console.error('   "if_fail": "Try memory write trace to find SHIL vs ref divergence"');
     console.error(' }');
     console.error('');
@@ -269,7 +269,7 @@ async function runTest() {
     server = await startServer();
     console.log(`[harness] Server started on port ${SERVER_PORT}`);
 
-    // 2. Launch browser (real Chromium, not headless — needs WebGL2)
+    // 2. Launch browser (real Chromium, not headless -needs WebGL2)
     console.log('[harness] Launching browser...');
     browser = await chromium.launch({
       headless: false,
@@ -329,7 +329,7 @@ async function runTest() {
     console.log(`[harness] Console log written: ${consolePath} (${consoleMessages.length} messages)`);
 
     // ========================================
-    // 9. ANALYSIS — crash, visual, behavioral
+    // 9. ANALYSIS -crash, visual, behavioral
     // ========================================
 
     // 9a. Crash detection
@@ -450,7 +450,7 @@ async function runTest() {
     // Patches are auto-regenerated by build-and-deploy.sh before build.
 
     // 1. AUTO-SEND ntfy notification (plain text, human-readable, with project context)
-    const ntfyTitle = `Flycast WASM — ${status}`;
+    const ntfyTitle = `Flycast WASM -${status}`;
     const ntfyLines = [];
     // Project context (from test-context.json)
     ntfyLines.push(`Issue: ${testContext.issue}`);
@@ -460,7 +460,7 @@ async function runTest() {
     if (status === 'PASS') {
       ntfyLines.push(`Result: BIOS rendered! ${visual.nonBlackRatio}% screen coverage, ${visual.uniqueColors} colors.`);
     } else if (status === 'FAIL_BLACK') {
-      ntfyLines.push(`Result: Black screen — BIOS did not render any graphics.`);
+      ntfyLines.push(`Result: Black screen -BIOS did not render any graphics.`);
     } else if (status === 'FAIL_CRASH') {
       ntfyLines.push(`Result: Emulator crashed.`);
       if (crashErrors.length > 0) ntfyLines.push(`Error: ${crashErrors[0].substring(0, 100)}`);
@@ -476,13 +476,11 @@ async function runTest() {
     // Next step (based on result)
     ntfyLines.push(`Next: ${status === 'PASS' ? testContext.if_pass : testContext.if_fail}`);
     const ntfyBody = ntfyLines.join('\n');
-    const ntfyTags = status === 'PASS' ? 'white_check_mark' : 'x';
     try {
       const ntfyPayload = JSON.stringify({
         topic: 'ccagent-ghostlaboratory',
         title: ntfyTitle,
         message: ntfyBody,
-        tags: [ntfyTags],
       });
       execSync(`curl -s -H "Content-Type: application/json" -d ${JSON.stringify(ntfyPayload)} https://ntfy.sh`, { timeout: 10000 });
       console.log(`[auto] ntfy sent: ${ntfyTitle}`);
@@ -490,7 +488,7 @@ async function runTest() {
       console.log(`[auto] ntfy FAILED: ${e.message}`);
     }
 
-    // DELETE context file — forces a new one before next test
+    // DELETE context file -forces a new one before next test
     try {
       fs.unlinkSync(contextPath);
       console.log('[auto] test-context.json consumed (must write new one before next test)');
@@ -500,7 +498,7 @@ async function runTest() {
 
     // 2. AUTO-COMMIT patches + test results (every test = a snapshot)
     try {
-      const commitMsg = `test: ${status} — ${status === 'PASS' ? `${visual.nonBlackRatio}% pixels, ${behavior.mainloopExits} frames` : (failureReasons[0] || 'no visual output').substring(0, 80)}`;
+      const commitMsg = `test: ${status} -${status === 'PASS' ? `${visual.nonBlackRatio}% pixels, ${behavior.mainloopExits} frames` : (failureReasons[0] || 'no visual output').substring(0, 80)}`;
       execSync('git add upstream/patches/ upstream/flycast-wasm-test.js upstream/link.sh upstream/build-and-deploy.sh', { cwd: PROJECT_DIR, timeout: 5000 });
       // Only commit if there are staged changes
       try {
@@ -527,7 +525,7 @@ async function runTest() {
 
     // 4. REMAINING MANUAL STEPS (agent must still do these):
     console.log('');
-    console.log('[checklist] Read test-screenshot.png — VISUALLY CONFIRM');
+    console.log('[checklist] Read test-screenshot.png -VISUALLY CONFIRM');
     console.log('[checklist] If FAIL: read test-console.log');
 
     return results;
