@@ -699,7 +699,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 5
+#define EXECUTOR_MODE 4
 
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
@@ -853,17 +853,38 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 #endif
 	}
 #elif EXECUTOR_MODE == 4
-	// REF execution with SHIL-style cycle charging.
-	// Uses ref_execute_block for computation (known correct) but charges
-	// guest_cycles upfront and suppresses OpPtr's cycle leak.
-	// If this is FAIL_BLACK: the issue is purely timing (not enough cycles charged).
-	// If this is PASS: the issue is in SHIL computation, not timing.
+	// REF execution with SHIL-style cycle charging + block exit comparison.
+	// Compares ref's natural PC (from OpPtr) with applyBlockExitCpp's PC
+	// to verify block exit logic is correct.
 	{
 		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
 		ref_execute_block(block);
-		// Suppress OpPtr leak: force cycle_counter to pre - guest_cycles
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+
+		// Compare ref's PC with applyBlockExitCpp's result
+		u32 ref_pc = ctx.pc;
+		applyBlockExitCpp(block);
+		u32 exit_pc = ctx.pc;
+		static u32 exit_mismatch_count = 0;
+		if (ref_pc != exit_pc && exit_mismatch_count < 200) {
+			exit_mismatch_count++;
+#ifdef __EMSCRIPTEN__
+			EM_ASM({ console.log('[EXIT-DIFF] #' + $0 +
+				' blk=' + $1 +
+				' block_pc=0x' + ($2>>>0).toString(16) +
+				' ref_pc=0x' + ($3>>>0).toString(16) +
+				' exit_pc=0x' + ($4>>>0).toString(16) +
+				' bt=' + $5 +
+				' T=' + $6 +
+				' jdyn=0x' + ($7>>>0).toString(16)); },
+				exit_mismatch_count, g_wasm_block_count, block->vaddr,
+				ref_pc, exit_pc, (int)block->BlockType,
+				ctx.sr.T, ctx.jdyn);
+#endif
+		}
+		// Restore ref's PC (the correct one) for continued execution
+		ctx.pc = ref_pc;
 	}
 #elif EXECUTOR_MODE == 5
 	// SHADOW COMPARISON: run ref first (correct), then SHIL on same input.
