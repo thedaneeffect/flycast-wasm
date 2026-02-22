@@ -759,7 +759,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 6
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -1404,7 +1404,20 @@ public:
 						}
 
 						if (it != blockByVaddr.end()) {
-							cpp_execute_block(it->second);
+							// Phase 2: Execute compiled WASM block
+							g_ifb_exception_pending = false;
+							u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
+							int trap = wasm_execute_block(pc, ctx_ptr);
+							if (trap) {
+								// WASM execution failed — fall back to C++ SHIL
+								cpp_execute_block(it->second);
+							} else {
+								// Check for deferred IFB exceptions
+								if (g_ifb_exception_pending) {
+									Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+									g_ifb_exception_pending = false;
+								}
+							}
 							blockExecs++;
 
 							if (sh4ctx->interrupt_pend)
