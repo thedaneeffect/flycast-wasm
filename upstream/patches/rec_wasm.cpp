@@ -32,6 +32,7 @@
 #include <cstring>
 
 #include "hw/sh4/sh4_rom.h"  // sin_table for FSCA
+#include "hw/pvr/pvr_regs.h"  // PVR register macros (FB_R_CTRL etc.)
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -1055,48 +1056,42 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	}
 #endif
 #if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4
-	if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
-	    block_count == 500000 || block_count == 1000000 || block_count == 2000000 ||
-	    block_count == 3000000 || block_count == 4000000 ||
-	    block_count == 5000000 || block_count == 6000000 ||
-	    block_count == 8000000 || block_count == 10000000 ||
-	    block_count == 15000000 || block_count == 20000000) {
+	if (block_count == 500000 || block_count == 1000000 || block_count == 2000000 ||
+	    block_count == 2500000 ||
+	    block_count == 5000000 || block_count == 10000000 ||
+	    block_count == 15000000 || block_count == 20000000 ||
+	    block_count == 25000000 || block_count == 30000000 ||
+	    block_count == 40000000 || block_count == 50000000) {
 		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
 			' reads=' + $1 + ' writes=' + $2 +
 			' pvr_wr=' + $3 + ' sq_wr=' + $4); },
 			block_count, g_shil_read_count, g_shil_write_count,
 			g_shil_pvr_write_count, g_shil_sq_write_count);
 
-		// Read key PVR registers directly
-		u32 fb_r_ctrl = ReadMem32(0xA05F8044);
-		u32 fb_w_ctrl = ReadMem32(0xA05F8048);
-		u32 spg_ctrl = ReadMem32(0xA05F80D0);
-		u32 fb_r_sof1 = ReadMem32(0xA05F8068);
-		u32 fb_r_sof2 = ReadMem32(0xA05F806C);
+		// Read PVR registers via BOTH paths: ReadMem and direct union
+		u32 fb_r_ctrl_mem = ReadMem32(0xA05F8044);
+		u32 fb_r_ctrl_union = FB_R_CTRL.full;
+		u32 fb_w_ctrl = FB_W_CTRL.full;
+		u32 spg_ctrl = SPG_CONTROL.full;
+		u32 fb_r_sof1 = FB_R_SOF1;
+		u32 fb_r_sof2 = FB_R_SOF2;
 		EM_ASM({ console.log('[PVR-REG] blk=' + $0 +
-			' FB_R_CTRL=0x' + ($1>>>0).toString(16) +
-			' FB_W_CTRL=0x' + ($2>>>0).toString(16) +
-			' SPG_CTRL=0x' + ($3>>>0).toString(16) +
-			' FB_R_SOF1=0x' + ($4>>>0).toString(16) +
-			' FB_R_SOF2=0x' + ($5>>>0).toString(16)); },
-			block_count, fb_r_ctrl, fb_w_ctrl, spg_ctrl, fb_r_sof1, fb_r_sof2);
+			' FB_R_CTRL_mem=0x' + ($1>>>0).toString(16) +
+			' FB_R_CTRL_union=0x' + ($2>>>0).toString(16) +
+			' fb_enable=' + ($2 & 1) +
+			' FB_W_CTRL=0x' + ($3>>>0).toString(16) +
+			' SPG=0x' + ($4>>>0).toString(16) +
+			' SOF1=0x' + ($5>>>0).toString(16) +
+			' SOF2=0x' + ($6>>>0).toString(16)); },
+			block_count, fb_r_ctrl_mem, fb_r_ctrl_union,
+			fb_w_ctrl, spg_ctrl, fb_r_sof1, fb_r_sof2);
 	}
 #endif
 #endif
 
 	block_count++;
 
-#ifdef __EMSCRIPTEN__
-	// Post-execution diagnostic
-	if (block_count >= 2360114 && block_count <= 2360117 && block->vaddr == 0x8c00b910) {
-		EM_ASM({ console.log('[POST] blk=' + $0 + ' PC=0x8c00b910' +
-			' r0=0x' + ($1>>>0).toString(16) +
-			' r1=0x' + ($2>>>0).toString(16) +
-			' T=' + $3 +
-			' pc=0x' + ($4>>>0).toString(16)); },
-			block_count, ctx.r[0], ctx.r[1], ctx.sr.T, ctx.pc);
-	}
-#endif
+	// (post-execution diagnostic removed — no longer needed)
 
 	pc_hash = pc_hash * 1000003u + block->vaddr;
 
@@ -1132,12 +1127,11 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	bool should_log = false;
-	if (block_count >= 2360100 && block_count <= 2360200) {
-		should_log = true;  // every single block
-	} else if (block_count >= 2360000 && block_count <= 2361000) {
-		should_log = (block_count % 100 == 0);
-	} else if (block_count <= 2500000) {
-		should_log = (block_count % 100000 == 0);
+	if (block_count <= 2500000) {
+		should_log = (block_count % 500000 == 0);
+	} else {
+		// Extended checkpoints to find divergence point
+		should_log = (block_count % 5000000 == 0);
 	}
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
