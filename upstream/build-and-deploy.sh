@@ -17,10 +17,22 @@ PROJECT_DIR="/mnt/c/DEV Projects/flycast-wasm"
 BUILD_DIR="$PROJECT_DIR/upstream/source/build-wasm"
 WSL_DIR="/home/ghost/flycast-wasm"
 DEMO_CORES="$PROJECT_DIR/demo/data/cores"
+SOURCE_DIR="$PROJECT_DIR/upstream/source"
+PATCHES_DIR="$PROJECT_DIR/upstream/patches"
 
 # Init emsdk
 source /home/ghost/.emsdk/emsdk_env.sh 2>/dev/null
 
+echo "=== STEP 0: Auto-Regenerate Patches ==="
+cd "$SOURCE_DIR"
+git diff -- CMakeLists.txt core/ shell/ > "$PATCHES_DIR/wasm-jit-phase1-modified.patch" 2>/dev/null || true
+cp core/rec-wasm/rec_wasm.cpp "$PATCHES_DIR/rec_wasm.cpp"
+# Also copy new header files if they exist
+[ -f core/rec-wasm/wasm_module_builder.h ] && cp core/rec-wasm/wasm_module_builder.h "$PATCHES_DIR/"
+[ -f core/rec-wasm/wasm_emit.h ] && cp core/rec-wasm/wasm_emit.h "$PATCHES_DIR/"
+echo "Patches synced from source"
+
+echo ""
 echo "=== STEP 1: Incremental CMake Build ==="
 cd "$BUILD_DIR"
 emmake make -j$(nproc) 2>&1 | tail -5
