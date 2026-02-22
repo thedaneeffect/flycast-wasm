@@ -525,14 +525,15 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 				                   (phys == 0x005F8014) || // STARTRENDER
 				                   (phys == 0x005F8060) || // FB_W_SOF1
 				                   (phys == 0x005F8064) || // FB_W_SOF2
-				                   (phys == 0x005F8068) || // FB_R_SOF1
-				                   (phys == 0x005F806C);   // FB_R_SOF2
+				                   (phys == 0x005F8050) || // FB_R_SOF1
+				                   (phys == 0x005F8054);   // FB_R_SOF2
 				if (g_shil_pvr_write_count <= 50 || is_critical) {
 					EM_ASM({ console.log('[PVR-WR] #' + $0 +
+						' blk=' + $4 +
 						' addr=0x' + ($1>>>0).toString(16) +
 						' val=0x' + ($2>>>0).toString(16) +
 						' size=' + $3); },
-						g_shil_pvr_write_count, addr, val, op.size);
+						g_shil_pvr_write_count, addr, val, op.size, g_wasm_block_count);
 				}
 #endif
 			}
@@ -740,7 +741,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 1
+#define EXECUTOR_MODE 4
 #define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
@@ -1349,12 +1350,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	}
 #endif
 #if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5 || EXECUTOR_MODE == 1 || EXECUTOR_MODE == 3
-	if (g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 || g_wasm_block_count == 2000000 ||
-	    g_wasm_block_count == 2500000 ||
-	    g_wasm_block_count == 5000000 || g_wasm_block_count == 10000000 ||
-	    g_wasm_block_count == 15000000 || g_wasm_block_count == 20000000 ||
-	    g_wasm_block_count == 25000000 || g_wasm_block_count == 30000000 ||
-	    g_wasm_block_count == 40000000 || g_wasm_block_count == 50000000) {
+	if (g_wasm_block_count % 500000 == 0 && g_wasm_block_count > 0 && g_wasm_block_count <= 50000000) {
 		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
 			' reads=' + $1 + ' writes=' + $2 +
 			' pvr_wr=' + $3 + ' sq_wr=' + $4 +
