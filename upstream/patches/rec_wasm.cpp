@@ -699,7 +699,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 0
+#define EXECUTOR_MODE 1
 
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
@@ -1058,26 +1058,35 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor with guest_offs-based per-instruction cycle charging.
+	// SHIL executor with per-instruction cycle charging matching ref_execute_block.
+	//
 	// Root cause: timer reads (TMU TCNT0) depend on cycle_counter via now().
-	// ref_execute_block charges 1 cycle per SH4 instruction (ctx.cycle_counter -= 1
-	// after each OpPtr call). Without this, SHIL ops see a stale cycle_counter,
-	// causing timer values to differ by the instruction index — cascading into
-	// control flow divergence (BIOS never enables framebuffer).
-	// Fix: use guest_offs (byte offset of the SH4 instruction that generated
-	// each SHIL op) to set cycle_counter = base - instruction_index before
-	// each op, matching ref_execute_block's per-instruction pattern exactly.
+	// ref_execute_block charges 1 cycle per loop iteration (after each OpPtr call).
+	// The delay slot is executed INSIDE the branch's OpPtr (same iteration), so it
+	// sees the same cycle_counter as the branch — NOT an extra charge.
+	//
+	// Fix: count distinct instruction boundaries (via guest_offs changes), but
+	// DON'T increment for delay slot ops. This matches ref_execute_block's loop
+	// iteration count exactly. Set cc = cc_base - iteration_count before each op.
 	{
 		int cc_pre = ctx.cycle_counter;
 		int cc_base = cc_pre - (int)block->guest_cycles;
 		ctx.cycle_counter = cc_base;
 		g_ifb_exception_pending = false;
+
+		int iter_count = 0;  // ref_execute_block loop iteration count
+		u16 last_offs = 0xFFFF;
 		for (u32 i = 0; i < block->oplist.size(); i++) {
-			// Set cycle_counter to match ref_execute_block at this instruction.
-			// In ref, instruction N executes with cc = cc_base - N.
-			// guest_offs is the byte offset from block start (2 bytes per SH4 instr).
-			u32 instr_idx = block->oplist[i].guest_offs / 2;
-			ctx.cycle_counter = cc_base - (int)instr_idx;
+			u16 offs = block->oplist[i].guest_offs;
+			if (offs != last_offs) {
+				// New instruction boundary — increment only if NOT delay slot.
+				// In ref_execute_block, the delay slot executes inside the branch's
+				// OpPtr (same iteration), so it doesn't get an extra charge.
+				if (last_offs != 0xFFFF && !block->oplist[i].delay_slot)
+					iter_count++;
+				last_offs = offs;
+			}
+			ctx.cycle_counter = cc_base - iter_count;
 			wasm_exec_shil_fb(block->vaddr, i);
 		}
 		ctx.cycle_counter = cc_base;
