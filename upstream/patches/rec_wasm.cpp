@@ -38,6 +38,10 @@
 #include <emscripten.h>
 #endif
 
+// Naomi serial EEPROM diagnostic counters (defined in naomi.cpp)
+extern u32 g_naomi_board_write_count;
+extern u32 g_naomi_board_read_count;
+
 // Verify Sh4Context offsets used in wasm_emit.h
 static_assert(offsetof(Sh4Context, pc) == 0x148, "PC offset mismatch");
 static_assert(offsetof(Sh4Context, jdyn) == 0x14C, "jdyn offset mismatch");
@@ -694,7 +698,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 3
+#define EXECUTOR_MODE 4
 #define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
@@ -1181,6 +1185,19 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			' SOF2=0x' + ($6>>>0).toString(16)); },
 			g_wasm_block_count, fb_r_ctrl_mem, fb_r_ctrl_union,
 			fb_w_ctrl, spg_ctrl, fb_r_sof1, fb_r_sof2);
+		// Naomi serial EEPROM access counters
+		EM_ASM({ console.log('[NAOMI-ID] blk=' + $0 +
+			' boardWrites=' + $1 + ' boardReads=' + $2); },
+			g_wasm_block_count, g_naomi_board_write_count, g_naomi_board_read_count);
+	}
+	// Extra Naomi counter checkpoints around the switchover
+	if (g_wasm_block_count == 2360000 || g_wasm_block_count == 2361000 ||
+	    g_wasm_block_count == 2362000 || g_wasm_block_count == 2365000 ||
+	    g_wasm_block_count == 2370000 || g_wasm_block_count == 2380000 ||
+	    g_wasm_block_count == 2400000 || g_wasm_block_count == 3000000) {
+		EM_ASM({ console.log('[NAOMI-ID] blk=' + $0 +
+			' boardWrites=' + $1 + ' boardReads=' + $2); },
+			g_wasm_block_count, g_naomi_board_write_count, g_naomi_board_read_count);
 	}
 #endif
 #endif
