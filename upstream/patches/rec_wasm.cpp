@@ -703,7 +703,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 }
 
 // === MODE SWITCH: 0=ref (per-instruction), 1=SHIL, 2=ref+guest_opcodes upfront, 3=hybrid ===
-#define EXECUTOR_MODE 2
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -774,28 +774,12 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 #endif
 	}
 #else
-	// SHIL standalone with ref PC verification.
-	// Runs ref first (correct path, maintains memory), then SHIL from same
-	// pre-block state. Compares next-PC. Continues with ref's state.
-	// This detects block exit bugs and SHIL op bugs in isolation.
+	// Pure SHIL executor — charge guest_cycles BEFORE ops (like x64 JIT).
+	// Previous approach charged AFTER ops, which meant hardware register reads
+	// (TMU timers, PVR status) during block execution saw stale cycle_counter.
+	// The x64 JIT charges guest_cycles upfront at block start.
 	{
-		static u32 pc_diverge_count = 0;
-		static u32 reg_diverge_count = 0;
-
-		// 1. Save pre-block ctx
-		Sh4Context pre_block;
-		memcpy(&pre_block, &ctx, sizeof(Sh4Context));
-
-		// 2. Run ref (correct path)
-		ctx.cycle_counter -= block->guest_opcodes;
-		ref_execute_block(block);
-
-		// Save ref post-block state
-		Sh4Context ref_post;
-		memcpy(&ref_post, &ctx, sizeof(Sh4Context));
-
-		// 3. Restore pre-block state and run SHIL
-		memcpy(&ctx, &pre_block, sizeof(Sh4Context));
+		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
@@ -804,74 +788,6 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
 			g_ifb_exception_pending = false;
 		}
-
-		// Save SHIL post-block state
-		u32 shil_pc = ctx.pc;
-		u32 shil_r0 = ctx.r[0];
-		u32 shil_r4 = ctx.r[4];
-		u32 shil_T = ctx.sr.T;
-		u32 shil_jdyn = ctx.jdyn;
-		u32 shil_pr = ctx.pr;
-
-		// 4. Compare
-		bool pc_match = (shil_pc == ref_post.pc);
-		bool reg_match = true;
-		// Check all 16 general regs + key special regs
-		for (int i = 0; i < 16; i++) {
-			if (ctx.r[i] != ref_post.r[i]) { reg_match = false; break; }
-		}
-		if (ctx.sr.T != ref_post.sr.T || ctx.jdyn != ref_post.jdyn ||
-		    ctx.pr != ref_post.pr || ctx.mac.l != ref_post.mac.l ||
-		    ctx.mac.h != ref_post.mac.h || ctx.gbr != ref_post.gbr)
-			reg_match = false;
-
-#ifdef __EMSCRIPTEN__
-		if (!pc_match && pc_diverge_count < 20) {
-			pc_diverge_count++;
-			EM_ASM({ console.log('[PC-BUG] blk=#' + $0 +
-				' block_pc=0x' + ($1>>>0).toString(16) +
-				' SHIL_next=0x' + ($2>>>0).toString(16) +
-				' REF_next=0x' + ($3>>>0).toString(16) +
-				' bt=' + $4 +
-				' T=' + $5 + ' jdyn=0x' + ($6>>>0).toString(16)); },
-				block_count, block->vaddr, shil_pc, ref_post.pc,
-				(int)block->BlockType, shil_T, shil_jdyn);
-		}
-		if (!reg_match && reg_diverge_count < 20) {
-			reg_diverge_count++;
-			EM_ASM({ console.log('[REG-BUG] blk=#' + $0 +
-				' block_pc=0x' + ($1>>>0).toString(16) +
-				' SHIL: r0=0x' + ($2>>>0).toString(16) +
-				' r4=0x' + ($3>>>0).toString(16) +
-				' T=' + $4 + ' pr=0x' + ($5>>>0).toString(16) +
-				' REF: r0=0x' + ($6>>>0).toString(16) +
-				' r4=0x' + ($7>>>0).toString(16) +
-				' T=' + $8 + ' pr=0x' + ($9>>>0).toString(16)); },
-				block_count, block->vaddr,
-				shil_r0, shil_r4, shil_T, shil_pr,
-				ref_post.r[0], ref_post.r[4], ref_post.sr.T, ref_post.pr);
-			// Dump all diverging regs
-			for (int i = 0; i < 16; i++) {
-				if (ctx.r[i] != ref_post.r[i]) {
-					EM_ASM({ console.log('[REG-BUG] r' + $0 +
-						' SHIL=0x' + ($1>>>0).toString(16) +
-						' REF=0x' + ($2>>>0).toString(16)); },
-						i, ctx.r[i], ref_post.r[i]);
-				}
-			}
-		}
-
-		// Periodic summary
-		if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
-		    block_count == 500000 || block_count == 1000000 || block_count == 2000000) {
-			EM_ASM({ console.log('[VERIFY] blk=' + $0 +
-				' pc_bugs=' + $1 + ' reg_bugs=' + $2); },
-				block_count, pc_diverge_count, reg_diverge_count);
-		}
-#endif
-
-		// 5. Restore ref's post-block state (continue with correct memory+state)
-		memcpy(&ctx, &ref_post, sizeof(Sh4Context));
 	}
 #endif
 

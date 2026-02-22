@@ -26,7 +26,7 @@
  */
 
 const { chromium } = require('playwright');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { PNG } = require('pngjs');
@@ -394,24 +394,42 @@ async function runTest() {
     console.log(`[harness] Console:  ${consolePath}`);
     console.log(`[harness] Screenshot: ${screenshotPath}`);
 
-    // === POST-TEST CHECKLIST (MANDATORY — follow every step) ===
+    // === AUTOMATED POST-TEST ACTIONS ===
+    // These run automatically so compliance doesn't depend on agent discipline.
+
+    // 1. AUTO-SEND ntfy notification
     const ntfyMsg = `${status}: ${status === 'PASS' ? `${visual.nonBlackRatio}% pixels, ${visual.uniqueColors} colors, ${behavior.mainloopExits} exits` : (failureReasons[0] || 'unknown')}`;
+    try {
+      execSync(`curl -s -d "${ntfyMsg.replace(/"/g, '\\"')}" ntfy.sh/ccagent-ghostlaboratory`, { timeout: 10000 });
+      console.log(`[auto] ntfy sent: ${ntfyMsg}`);
+    } catch (e) {
+      console.log(`[auto] ntfy FAILED: ${e.message}`);
+    }
+
+    // 2. AUTO-CHECK git status — warn about uncommitted changes
+    try {
+      const gitStatus = execSync('git status --porcelain', { cwd: PROJECT_DIR, encoding: 'utf-8', timeout: 5000 });
+      const uncommitted = gitStatus.trim().split('\n').filter(l => l.trim());
+      if (uncommitted.length > 0) {
+        console.log('');
+        console.log('[git] !! UNCOMMITTED CHANGES DETECTED !!');
+        uncommitted.forEach(l => console.log(`[git]   ${l}`));
+        console.log('[git] Remember: commit after meaningful progress, push on milestones/PASS/session-end');
+      } else {
+        console.log('[git] Working tree clean.');
+      }
+    } catch (e) {
+      console.log(`[git] status check failed: ${e.message}`);
+    }
+
+    // 3. REMAINING MANUAL STEPS (agent must still do these):
     console.log('');
     console.log('[checklist] ========================================');
-    console.log('[checklist]  POST-TEST CHECKLIST (DO ALL OF THESE)');
+    console.log('[checklist]  MANUAL STEPS REMAINING:');
     console.log('[checklist] ========================================');
-    console.log(`[checklist] [ ] 1. Send ntfy notification:`);
-    console.log(`[checklist]        curl -d "${ntfyMsg}" ntfy.sh/ccagent-ghostlaboratory`);
-    console.log(`[checklist] [ ] 2. Read test-screenshot.png — VISUALLY CONFIRM (even on PASS)`);
-    console.log(`[checklist] [ ] 3. If FAIL: read test-console.log for crash/error details`);
-    console.log(`[checklist] [ ] 4. If source changed: regenerate patches`);
-    console.log(`[checklist]        cd upstream/source && git diff -- CMakeLists.txt core/ shell/ > ../patches/wasm-jit-phase1-modified.patch`);
-    console.log(`[checklist]        cp core/rec-wasm/rec_wasm.cpp ../patches/rec_wasm.cpp`);
-    console.log(`[checklist] [ ] 5. Git commit + push if meaningful progress:`);
-    console.log(`[checklist]        git add upstream/patches/ upstream/flycast-wasm-test.js upstream/link.sh`);
-    console.log(`[checklist]        git commit -m "type: description"`);
-    console.log(`[checklist]        git push  (on milestones / PASS / end of session)`);
-    console.log(`[checklist] [ ] 6. Update memory files if milestone reached`);
+    console.log('[checklist] [ ] Read test-screenshot.png — VISUALLY CONFIRM');
+    console.log('[checklist] [ ] If FAIL: read test-console.log');
+    console.log('[checklist] [ ] If source changed: regenerate patches + commit');
     console.log('[checklist] ========================================');
 
     return results;
