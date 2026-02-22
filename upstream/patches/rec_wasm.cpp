@@ -546,11 +546,10 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 	case shop_ifb: {
 		if (op.rs1._imm)
 			ctx.pc = op.rs2._imm;
-		// Save/restore cycle_counter around OpPtr to prevent side effects from
-		// OpPtr's internal cycle charging (which would crash if left unchecked).
-		// This means SHIL doesn't match ref's mid-block cycle_counter evolution,
-		// but cycle_counter timing has been proven NOT the cause of divergence.
-		int saved_cc = ctx.cycle_counter;
+		// Let OpPtr modify cycle_counter naturally during block execution.
+		// Timing-dependent hardware register reads (e.g. RTC at 0xFFD8xxxx)
+		// need to see correct intermediate cycle_counter values.
+		// cycle_counter is forced back to the correct value at block end.
 		try {
 			if (ctx.sr.FD == 1 && OpDesc[op.rs3._imm]->IsFloatingPoint())
 				throw SH4ThrownException(ctx.pc - 2, Sh4Ex_FpuDisabled);
@@ -560,7 +559,6 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 			g_ifb_exception_epc = ex.epc;
 			g_ifb_exception_expEvn = ex.expEvn;
 		}
-		ctx.cycle_counter = saved_cc;
 		break;
 	}
 	case shop_swaplb: {
@@ -1057,14 +1055,16 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor — charge guest_cycles upfront, save/restore in shop_ifb.
-	// Timing experiments proved cycle_counter is NOT the cause of divergence.
-	// The bug is in SHIL op computation itself.
+	// SHIL executor — match mode 4's cycle_counter management:
+	// Let OpPtr modify cycle_counter naturally during block (for timing-dependent
+	// hardware register reads), then force it back at block end.
 	{
+		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
+		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
@@ -1199,42 +1199,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	state_hash3 = state_hash3 * 1000003u + sh3;
 
 #ifdef __EMSCRIPTEN__
-	// Per-block dump in 3217900-3218000, summary elsewhere
-	bool should_log = (g_wasm_block_count % 500000 == 0);
-	bool should_dump = (g_wasm_block_count >= 3217900 && g_wasm_block_count <= 3218000);
-	if (should_dump) {
-		EM_ASM({ console.log('[DUMP] blk=' + $0 +
-			' pc=0x' + ($1>>>0).toString(16) +
-			' r0=0x' + ($2>>>0).toString(16) +
-			' r1=0x' + ($3>>>0).toString(16) +
-			' r2=0x' + ($4>>>0).toString(16) +
-			' r3=0x' + ($5>>>0).toString(16) +
-			' r4=0x' + ($6>>>0).toString(16) +
-			' r5=0x' + ($7>>>0).toString(16) +
-			' r6=0x' + ($8>>>0).toString(16) +
-			' r7=0x' + ($9>>>0).toString(16) +
-			' T=' + $10); },
-			g_wasm_block_count, ctx.pc,
-			ctx.r[0], ctx.r[1], ctx.r[2], ctx.r[3],
-			ctx.r[4], ctx.r[5], ctx.r[6], ctx.r[7],
-			ctx.sr.T);
-		EM_ASM({ console.log('[DUMP2] blk=' + $0 +
-			' r8=0x' + ($1>>>0).toString(16) +
-			' r9=0x' + ($2>>>0).toString(16) +
-			' r10=0x' + ($3>>>0).toString(16) +
-			' r11=0x' + ($4>>>0).toString(16) +
-			' r12=0x' + ($5>>>0).toString(16) +
-			' r13=0x' + ($6>>>0).toString(16) +
-			' r14=0x' + ($7>>>0).toString(16) +
-			' r15=0x' + ($8>>>0).toString(16) +
-			' pr=0x' + ($9>>>0).toString(16) +
-			' macl=0x' + ($10>>>0).toString(16)); },
-			g_wasm_block_count,
-			ctx.r[8], ctx.r[9], ctx.r[10], ctx.r[11],
-			ctx.r[12], ctx.r[13], ctx.r[14], ctx.r[15],
-			ctx.pr, ctx.mac.l);
-	}
-	if (should_log || should_dump) {
+	if (g_wasm_block_count % 500000 == 0) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
 			' hPC=0x' + ($2>>>0).toString(16) +
@@ -1463,33 +1428,6 @@ public:
 				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
 				compiledCount, failCount, block->vaddr,
 				(int)block->oplist.size());
-		}
-		// Dump SHIL ops for the specific block where r0 diverges
-		if (block->vaddr == 0x8c00b646 || block->vaddr == 0x8c00b63c) {
-			EM_ASM({ console.log('[BLOCK-DUMP] pc=0x' + ($0>>>0).toString(16) +
-				' ops=' + $1 + ' go=' + $2 + ' gc=' + $3 +
-				' type=' + $4 + ' branch=0x' + ($5>>>0).toString(16) +
-				' next=0x' + ($6>>>0).toString(16) +
-				' sh4size=' + $7); },
-				block->vaddr, (int)block->oplist.size(),
-				block->guest_opcodes, block->guest_cycles,
-				(int)block->BlockType, block->BranchBlock,
-				block->NextBlock, block->sh4_code_size);
-			for (u32 i = 0; i < block->oplist.size(); i++) {
-				auto& sop = block->oplist[i];
-				EM_ASM({ console.log('[BLOCK-OP] [' + $0 + '] shop=' + $1 +
-					' rd_type=' + $2 + ' rd_imm=0x' + ($3>>>0).toString(16) +
-					' rs1_type=' + $4 + ' rs1_imm=0x' + ($5>>>0).toString(16) +
-					' rs2_type=' + $6 + ' rs2_imm=0x' + ($7>>>0).toString(16) +
-					' rs3_type=' + $8 + ' rs3_imm=0x' + ($9>>>0).toString(16) +
-					' size=' + $10); },
-					i, (int)sop.op,
-					(int)sop.rd.type, sop.rd._imm,
-					(int)sop.rs1.type, sop.rs1._imm,
-					(int)sop.rs2.type, sop.rs2._imm,
-					(int)sop.rs3.type, sop.rs3._imm,
-					sop.size);
-			}
 		}
 #endif
 	}
