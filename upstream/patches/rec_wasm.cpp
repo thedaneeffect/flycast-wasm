@@ -741,7 +741,7 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 5
+#define EXECUTOR_MODE 3
 #define SHIL_START_BLOCK 24168000
 
 // Reference executor: per-instruction via OpPtr
@@ -858,25 +858,16 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	// REF executor (per-instruction charging)
 	ref_execute_block(block);
 #elif EXECUTOR_MODE == 3
-	// HYBRID: ref (mode 4 path) for early blocks, SHIL (mode 1 path) after threshold.
-	// Both paths use guest_cycles charging with forced reset.
-	// This isolates whether SHIL works correctly when starting from known-good state.
-	if (g_wasm_block_count < SHIL_START_BLOCK) {
-		// Mode 4 ref path (known PASS): guest_cycles + ref_execute_block + forced reset
-		int cc_pre = ctx.cycle_counter;
-		ctx.cycle_counter -= block->guest_cycles;
-		ref_execute_block(block);
-		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
-		// Use ref's own PC (not applyBlockExitCpp)
-	} else {
-		// Mode 3 SHIL path with FULL binary comparison for first N blocks.
-		// Compares ALL 512 bytes of Sh4Context (not just known registers).
-		// This catches: old_sr, old_fpscr, sq_buffer, temp_reg, interrupt_pend.
-		u32 shil_idx = g_wasm_block_count - SHIL_START_BLOCK;
-		static u32 diag_diff_count = 0;
-		bool diag = (shil_idx < 2000 && diag_diff_count < 50);
+	// PERIODIC SHADOW COMPARISON: SHIL for all blocks, with periodic ref comparison.
+	// Every SHADOW_INTERVAL blocks, run 10 blocks through both ref and SHIL,
+	// comparing full Sh4Context (512 bytes). This covers the entire execution range
+	// at SHIL speed, catching rare SHIL op bugs that only manifest after millions of blocks.
+	{
+		static u32 shadow_diff_count = 0;
+		// Do shadow comparison for 10 blocks every 500K blocks
+		bool do_shadow = (g_wasm_block_count % 500000 < 10) && (shadow_diff_count < 100);
 
-		if (diag) {
+		if (do_shadow) {
 			// Save pre-block state
 			alignas(16) static u8 diag_backup[sizeof(Sh4Context)];
 			memcpy(diag_backup, &ctx, sizeof(Sh4Context));
@@ -910,13 +901,12 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			// Full binary comparison of ALL 512 bytes
 			const u8* ref_bytes = (const u8*)diag_ref;
 			const u8* shil_bytes = (const u8*)&ctx;
-			// Skip offsets: cycle_counter (0x174, 4 bytes) and doSqWrite pointer (0x178, 4 bytes)
 			bool any_diff = false;
 			int first_diff_off = -1;
 			u32 first_diff_ref = 0, first_diff_shil = 0;
 			int diff_count = 0;
 			for (int off = 0; off < (int)sizeof(Sh4Context); off += 4) {
-				// Skip cycle_counter and doSqWrite
+				// Skip cycle_counter and doSqWrite pointer
 				if (off == 0x174 || off == 0x178) continue;
 				u32 rv = *(u32*)(ref_bytes + off);
 				u32 sv = *(u32*)(shil_bytes + off);
@@ -932,8 +922,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			}
 #ifdef __EMSCRIPTEN__
 			if (any_diff) {
-				diag_diff_count++;
-				// Map offset to field name
+				shadow_diff_count++;
 				const char* field_name = "unknown";
 				if (first_diff_off < 0x20) field_name = "sq_buffer[0]";
 				else if (first_diff_off < 0x40) field_name = "sq_buffer[1]";
@@ -963,37 +952,36 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 				else if (first_diff_off == 0x16C) field_name = "interrupt_pend";
 				else if (first_diff_off == 0x170) field_name = "temp_reg";
 
-				EM_ASM({ console.log('[DIAG-FULL] #' + $0 +
-					' blk_pc=0x' + ($1>>>0).toString(16) +
-					' bt=' + $2 +
+				EM_ASM({ console.log('[SHADOW3] #' + $0 +
+					' blk=' + $1 +
+					' pc=0x' + ($2>>>0).toString(16) +
 					' diffs=' + $3 +
 					' first_off=0x' + ($4>>>0).toString(16) +
 					' field=' + UTF8ToString($5) +
 					' ref=0x' + ($6>>>0).toString(16) +
 					' shil=0x' + ($7>>>0).toString(16) +
 					' nops=' + $8); },
-					shil_idx, block->vaddr, (int)block->BlockType,
+					shadow_diff_count, g_wasm_block_count, block->vaddr,
 					diff_count, first_diff_off, field_name,
 					first_diff_ref, first_diff_shil,
 					(u32)block->oplist.size());
 
-				// For first 10 diffs, also dump all differing offsets
-				if (diag_diff_count <= 10) {
+				// For first 10 diffs, dump all differing offsets + oplist
+				if (shadow_diff_count <= 10) {
 					for (int off = 0; off < (int)sizeof(Sh4Context); off += 4) {
 						if (off == 0x174 || off == 0x178) continue;
 						u32 rv = *(u32*)(ref_bytes + off);
 						u32 sv = *(u32*)(shil_bytes + off);
 						if (rv != sv) {
-							EM_ASM({ console.log('[DIAG-DIFF] off=0x' + ($0>>>0).toString(16) +
+							EM_ASM({ console.log('[SHADOW3-DIFF] off=0x' + ($0>>>0).toString(16) +
 								' ref=0x' + ($1>>>0).toString(16) +
 								' shil=0x' + ($2>>>0).toString(16)); },
 								off, rv, sv);
 						}
 					}
-					// Dump oplist
 					for (u32 i = 0; i < block->oplist.size() && i < 30; i++) {
 						auto& sop = block->oplist[i];
-						EM_ASM({ console.log('[DIAG-OP] [' + $0 + '] shop=' + $1 +
+						EM_ASM({ console.log('[SHADOW3-OP] [' + $0 + '] shop=' + $1 +
 							' rd_type=' + $2 + ' rd_imm=0x' + ($3>>>0).toString(16) +
 							' rs1_type=' + $4 + ' rs1_imm=0x' + ($5>>>0).toString(16) +
 							' rs2_type=' + $6 + ' rs2_imm=0x' + ($7>>>0).toString(16) +
@@ -1005,12 +993,21 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 							sop.size);
 					}
 				}
+			} else {
+				// Log periodic match confirmation
+				if (g_wasm_block_count % 500000 == 0) {
+					EM_ASM({ console.log('[SHADOW3-OK] blk=' + $0 +
+						' pc=0x' + ($1>>>0).toString(16) +
+						' nops=' + $2); },
+						g_wasm_block_count, block->vaddr,
+						(u32)block->oplist.size());
+				}
 			}
 #endif
-			// Restore ref's result
-			memcpy(&ctx, diag_ref, sizeof(Sh4Context));
+			// Use SHIL's result for continued execution (since we're running in SHIL mode)
+			// Do NOT restore ref — this is SHIL execution with periodic checks
 		} else {
-			// Pure SHIL
+			// Pure SHIL (majority of blocks)
 			int cc_pre = ctx.cycle_counter;
 			ctx.cycle_counter -= block->guest_cycles;
 			g_ifb_exception_pending = false;
