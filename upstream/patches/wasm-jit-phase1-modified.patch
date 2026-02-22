@@ -295,10 +295,10 @@ index 4fbb9a5..be30d56 100644
  			|| (!render_called && fb_dirty && FB_R_CTRL.fb_enable))
  	{
 diff --git a/core/hw/pvr/pvr_regs.cpp b/core/hw/pvr/pvr_regs.cpp
-index 0538b3c..7379db7 100644
+index 0538b3c..836d160 100644
 --- a/core/hw/pvr/pvr_regs.cpp
 +++ b/core/hw/pvr/pvr_regs.cpp
-@@ -1,254 +1,284 @@
+@@ -1,254 +1,292 @@
 -#include "pvr_regs.h"
 -#include "pvr_mem.h"
 -#include "Renderer_if.h"
@@ -776,6 +776,14 @@ index 0538b3c..7379db7 100644
 +
 +	case FB_R_SOF1_addr:
 +	case FB_R_SOF2_addr:
++#ifdef __EMSCRIPTEN__
++		EM_ASM({ console.log('[PVR-SOF-WR] blk=' + $0 +
++			' reg=' + ($1 == 0x50 ? 'SOF1' : 'SOF2') +
++			' val=0x' + ($2>>>0).toString(16) +
++			' masked=0x' + (($2 & 0x00fffffc)>>>0).toString(16) +
++			' pc=0x' + ($3>>>0).toString(16)); },
++			g_wasm_block_count, addr, data, Sh4cntx.pc);
++#endif
 +		data &= 0x00fffffc;
 +		rend_swap_frame(data);
 +		break;
