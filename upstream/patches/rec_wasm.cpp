@@ -777,7 +777,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 4
+#define EXECUTOR_MODE 1
 
 static u32 pc_hash = 0;
 u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
@@ -1199,10 +1199,10 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	state_hash3 = state_hash3 * 1000003u + sh3;
 
 #ifdef __EMSCRIPTEN__
-	// Fine-grained TRACE in 3M-3.5M range (10K intervals), 50K in 2M-3M, 500K elsewhere
+	// Ultra-fine TRACE: 1K intervals in 3.21M-3.22M, 10K in 3M-3.5M, 500K elsewhere
 	bool should_log = (g_wasm_block_count % 500000 == 0) ||
-		(g_wasm_block_count >= 2000000 && g_wasm_block_count <= 3000000 && g_wasm_block_count % 50000 == 0) ||
-		(g_wasm_block_count >= 3000000 && g_wasm_block_count <= 3500000 && g_wasm_block_count % 10000 == 0);
+		(g_wasm_block_count >= 3000000 && g_wasm_block_count <= 3500000 && g_wasm_block_count % 10000 == 0) ||
+		(g_wasm_block_count >= 3210000 && g_wasm_block_count <= 3220000 && g_wasm_block_count % 1000 == 0);
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
