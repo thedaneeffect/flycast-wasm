@@ -1591,18 +1591,19 @@ public:
 	void compile(RuntimeBlockInfo* block, bool smc_checks, bool optimise) override
 	{
 		// Handle FPCB aliasing: SH4 address mirrors (0x0C/0x8C/0xAC) map to
-		// the same FPCB index. If a block from a different address already
-		// occupies this FPCB slot, discard it to prevent bm_AddBlock verify
-		// failure. Standard dynarec handles this via block-check code; we
-		// bypass FPCB dispatch entirely (JS cache uses exact PC).
+		// the same FPCB index via (addr>>1)&FPCB_MASK. If another block
+		// already occupies this slot, clear it to prevent bm_AddBlock verify
+		// failure. Standard dynarec handles this via block-check code at the
+		// start of each compiled block; we bypass FPCB dispatch entirely
+		// (JS cache uses exact PC), so aliased entries persist.
+		// Note: we access p_sh4rcb->fpcb directly because bm_GetBlock()
+		// uses containsCode() which requires host_code_size > 0, but our
+		// WASM blocks use dummy code pointers with zero host_code_size.
 		{
-			RuntimeBlockInfoPtr aliased = bm_GetBlock(block->addr);
-			if (aliased) {
-				bm_DiscardBlock(aliased.get());
-				// Also remove from our caches
-				wasm_remove_block(aliased->vaddr);
-				blockByVaddr.erase(aliased->vaddr);
-				blockCodeHash.erase(aliased->vaddr);
+			DynarecCodeEntryPtr& fpcb_entry =
+				(DynarecCodeEntryPtr&)p_sh4rcb->fpcb[(block->addr >> 1) & FPCB_MASK];
+			if ((void*)fpcb_entry != (void*)ngen_FailedToFindBlock) {
+				fpcb_entry = ngen_FailedToFindBlock;
 			}
 		}
 
@@ -1627,8 +1628,9 @@ public:
 		compiledCount++;
 #endif
 
-		// Dummy code pointer for block manager
+		// Dummy code pointer for block manager (4 bytes per block)
 		block->code = (DynarecCodeEntryPtr)codeBuffer->get();
+		block->host_code_size = 4;
 		if (codeBuffer->getFreeSpace() >= 4)
 			codeBuffer->advance(4);
 
