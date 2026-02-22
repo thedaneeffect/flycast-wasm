@@ -1058,38 +1058,19 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor with per-instruction cycle charging matching ref_execute_block.
+	// SHIL executor — charge guest_opcodes (not guest_cycles).
 	//
-	// Root cause: timer reads (TMU TCNT0) depend on cycle_counter via now().
-	// ref_execute_block charges 1 cycle per loop iteration (after each OpPtr call).
-	// The delay slot is executed INSIDE the branch's OpPtr (same iteration), so it
-	// sees the same cycle_counter as the branch — NOT an extra charge.
-	//
-	// Fix: count distinct instruction boundaries (via guest_offs changes), but
-	// DON'T increment for delay slot ops. This matches ref_execute_block's loop
-	// iteration count exactly. Set cc = cc_base - iteration_count before each op.
+	// ref_execute_block charges flat -1 per loop iteration via #if EXECUTOR_MODE==0.
+	// This is approximately equal to guest_opcodes (number of SH4 instructions).
+	// guest_cycles uses SH4 timing tables (countCycles) and doesn't match the
+	// flat -1 model. Using guest_opcodes reduces accumulated timing drift.
 	{
 		int cc_pre = ctx.cycle_counter;
-		int cc_base = cc_pre - (int)block->guest_cycles;
-		ctx.cycle_counter = cc_base;
+		ctx.cycle_counter -= block->guest_opcodes;
 		g_ifb_exception_pending = false;
-
-		int iter_count = 0;  // ref_execute_block loop iteration count
-		u16 last_offs = 0xFFFF;
-		for (u32 i = 0; i < block->oplist.size(); i++) {
-			u16 offs = block->oplist[i].guest_offs;
-			if (offs != last_offs) {
-				// New instruction boundary — increment only if NOT delay slot.
-				// In ref_execute_block, the delay slot executes inside the branch's
-				// OpPtr (same iteration), so it doesn't get an extra charge.
-				if (last_offs != 0xFFFF && !block->oplist[i].delay_slot)
-					iter_count++;
-				last_offs = offs;
-			}
-			ctx.cycle_counter = cc_base - iter_count;
+		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
-		}
-		ctx.cycle_counter = cc_base;
+		ctx.cycle_counter = cc_pre - (int)block->guest_opcodes;
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
