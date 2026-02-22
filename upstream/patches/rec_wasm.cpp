@@ -892,11 +892,17 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		// Restore pre-block registers for SHIL (memory keeps ref's writes)
 		memcpy(&ctx, &ctx_backup, sizeof(Sh4Context));
 
-		// --- Run SHIL ---
+		// --- Run SHIL (skip writem to prevent memory corruption) ---
+		// SHIL writes could overwrite ref's correct memory with wrong values,
+		// causing cascading false positives. Skip shop_writem (op 6) so that
+		// memory stays in ref's (correct) state for all subsequent blocks.
+		// This means SHIL readm ops see ref's memory values, which is correct.
 		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
-		for (u32 i = 0; i < block->oplist.size(); i++)
-			wasm_exec_shil_fb(block->vaddr, i);
+		for (u32 i = 0; i < block->oplist.size(); i++) {
+			if (block->oplist[i].op != shop_writem)
+				wasm_exec_shil_fb(block->vaddr, i);
+		}
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
@@ -904,7 +910,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 
 		// Compare SHIL vs ref registers (skip cycle_counter)
-		if (shadow_mismatch_count < 30) {
+		if (shadow_mismatch_count < 100) {
 			bool match = true;
 			int diff_reg = -1;
 			const char* diff_name = "";
