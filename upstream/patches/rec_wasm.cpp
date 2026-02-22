@@ -1271,14 +1271,11 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	u8 lt = WASM_TYPE_I32;
 	b.emitLocals(1, &lc, &lt);
 
-	// Prologue: cycle_counter -= guest_opcodes
-	// DIAGNOSTIC: Using guest_opcodes (≈1 per instruction) instead of guest_cycles
-	// to match ref_execute_block's per-instruction cycle charging.
-	// If this fixes FAIL_BLACK, the issue is guest_cycles overcharging.
+	// Prologue: cycle_counter -= guest_cycles (matches C++ SHIL mode 6)
 	b.op_local_get(LOCAL_CTX);
 	b.op_local_get(LOCAL_CTX);
 	b.op_i32_load(ctx_off::CYCLE_COUNTER);
-	b.op_i32_const((s32)block->guest_opcodes);
+	b.op_i32_const((s32)block->guest_cycles);
 	b.op_i32_sub();
 	b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
