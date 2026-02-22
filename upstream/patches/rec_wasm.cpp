@@ -1564,6 +1564,10 @@ public:
 		u32 timeslices = 0;
 		double ml_start = emscripten_get_now();
 		u32 fb_count_start = g_shil_fb_call_count;
+		double compile_ms_start = wasm_prof_compile_ms();
+		double exec_sample_ms_start = wasm_prof_exec_sample_ms();
+		int exec_samples_start = wasm_prof_exec_samples();
+		int exec_count_start = wasm_prof_exec_count();
 
 		try {
 			do {
@@ -1639,10 +1643,10 @@ public:
 		// Profiling dump at mainloop exit
 		{
 			double ml_elapsed = emscripten_get_now() - ml_start;
-			double compile_ms = wasm_prof_compile_ms();
-			double exec_sample_ms = wasm_prof_exec_sample_ms();
-			int exec_samples = wasm_prof_exec_samples();
-			int exec_count = wasm_prof_exec_count();
+			double compile_ms = wasm_prof_compile_ms() - compile_ms_start;
+			double exec_sample_ms = wasm_prof_exec_sample_ms() - exec_sample_ms_start;
+			int exec_samples = wasm_prof_exec_samples() - exec_samples_start;
+			int exec_count = wasm_prof_exec_count() - exec_count_start;
 			u32 fb_calls = g_shil_fb_call_count - fb_count_start;
 
 			// Estimated total execution time from samples
