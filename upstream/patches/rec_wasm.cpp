@@ -759,7 +759,7 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 6
+#define EXECUTOR_MODE 4
 
 static u32 pc_hash = 0;
 static u32 block_count = 0;
@@ -1126,13 +1126,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	state_hash3 = state_hash3 * 1000003u + sh3;
 
 #ifdef __EMSCRIPTEN__
-	bool should_log = false;
-	if (block_count >= 2360000 && block_count <= 2370000) {
-		// Per-block: divergence happens in this exact window
-		should_log = true;
-	} else if (block_count <= 2500000) {
-		should_log = (block_count % 100000 == 0);
-	}
+	bool should_log = (block_count % 5000000 == 0);
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
