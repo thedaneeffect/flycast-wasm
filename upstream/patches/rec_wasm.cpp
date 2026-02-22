@@ -1352,6 +1352,8 @@ public:
 		// Store hash for SMC detection (first 2 bytes of block code)
 		blockCodeHash[block->vaddr] = (u32)IReadMem16(block->vaddr);
 
+#if EXECUTOR_MODE == 6
+		// Only build WASM modules when using WASM execution
 		WasmModuleBuilder builder;
 		buildBlockModule(builder, block);
 
@@ -1362,6 +1364,9 @@ public:
 			compiledCount++;
 		else
 			failCount++;
+#else
+		compiledCount++;
+#endif
 
 		// Dummy code pointer for block manager
 		block->code = (DynarecCodeEntryPtr)codeBuffer->get();
