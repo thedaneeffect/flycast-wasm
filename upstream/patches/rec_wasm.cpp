@@ -175,12 +175,27 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_ifb(u32 opcode, u32 pc) {
 // Runtime SHIL op interpreter — executes a single SHIL op by reading
 // register values from Sh4Context, performing the operation, and writing
 // results back. Used for ops that the WASM emitter doesn't handle natively.
+static u32 g_shil_fb_call_count = 0;
+static u32 g_shil_fb_miss_count = 0;
+
 void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
+	g_shil_fb_call_count++;
 	// Skip remaining ops after a deferred exception (block should abort)
 	if (g_ifb_exception_pending) return;
 
 	auto it = blockByVaddr.find(block_vaddr);
-	if (it == blockByVaddr.end()) return;
+	if (it == blockByVaddr.end()) {
+		g_shil_fb_miss_count++;
+#ifdef __EMSCRIPTEN__
+		if (g_shil_fb_miss_count <= 20) {
+			EM_ASM({ console.log('[SHIL-FB-MISS] #' + $0 +
+				' vaddr=0x' + ($1>>>0).toString(16) +
+				' op_idx=' + $2); },
+				g_shil_fb_miss_count, block_vaddr, op_index);
+		}
+#endif
+		return;
+	}
 	RuntimeBlockInfo* block = it->second;
 	if (op_index >= block->oplist.size()) return;
 
@@ -1007,18 +1022,65 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		memcpy(&ctx, &ref_result, sizeof(Sh4Context));
 	}
 #elif EXECUTOR_MODE == 6
-	// Phase 2: Execute compiled WASM block (with diagnostic infrastructure)
+	// Phase 2: WASM execution with shadow comparison for first N blocks
 	{
+		// Save ctx snapshot for comparison
+		Sh4Context saved_ctx;
+		bool do_shadow = (block_count < 20);
+		if (do_shadow) memcpy(&saved_ctx, &ctx, sizeof(Sh4Context));
+
+		// Execute via WASM
 		g_ifb_exception_pending = false;
 		u32 ctx_ptr = (u32)(uintptr_t)&ctx;
 		int trap = wasm_execute_block(block->vaddr, ctx_ptr);
 		if (trap) {
-			// WASM trap — fallback to C++ SHIL
 			ctx.cycle_counter -= block->guest_cycles;
 			for (u32 i = 0; i < block->oplist.size(); i++)
 				wasm_exec_shil_fb(block->vaddr, i);
 			applyBlockExitCpp(block);
 		}
+		u32 wasm_pc = ctx.pc;
+		u32 wasm_cc = ctx.cycle_counter;
+		u32 wasm_r0 = ctx.r[0];
+
+		if (do_shadow) {
+			// Restore and run C++ path
+			memcpy(&ctx, &saved_ctx, sizeof(Sh4Context));
+			g_ifb_exception_pending = false;
+			ctx.cycle_counter -= block->guest_cycles;
+			for (u32 i = 0; i < block->oplist.size(); i++)
+				wasm_exec_shil_fb(block->vaddr, i);
+			applyBlockExitCpp(block);
+
+			u32 cpp_pc = ctx.pc;
+			u32 cpp_cc = ctx.cycle_counter;
+			u32 cpp_r0 = ctx.r[0];
+
+#ifdef __EMSCRIPTEN__
+			if (wasm_pc != cpp_pc || wasm_r0 != cpp_r0) {
+				EM_ASM({ console.log('[SHADOW] blk=' + $0 +
+					' pc=0x' + ($1>>>0).toString(16) +
+					' WASM: pc=0x' + ($2>>>0).toString(16) +
+					' cc=' + ($3|0) + ' r0=0x' + ($4>>>0).toString(16) +
+					' CPP: pc=0x' + ($5>>>0).toString(16) +
+					' cc=' + ($6|0) + ' r0=0x' + ($7>>>0).toString(16)); },
+					block_count, block->vaddr,
+					wasm_pc, wasm_cc, wasm_r0,
+					cpp_pc, cpp_cc, cpp_r0);
+			} else if (block_count < 5) {
+				EM_ASM({ console.log('[SHADOW-OK] blk=' + $0 +
+					' pc=0x' + ($1>>>0).toString(16) +
+					' next_pc=0x' + ($2>>>0).toString(16)); },
+					block_count, block->vaddr, cpp_pc);
+			}
+#endif
+			// Use C++ result for actual execution (known correct)
+			// (ctx already has C++ result from the restore+execute above)
+		} else {
+			// Past shadow threshold — use WASM result
+			// ctx already has WASM result
+		}
+
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
 			g_ifb_exception_pending = false;
@@ -1068,9 +1130,11 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	    block_count == 40000000 || block_count == 50000000) {
 		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
 			' reads=' + $1 + ' writes=' + $2 +
-			' pvr_wr=' + $3 + ' sq_wr=' + $4); },
+			' pvr_wr=' + $3 + ' sq_wr=' + $4 +
+			' fb_calls=' + $5 + ' fb_miss=' + $6); },
 			block_count, g_shil_read_count, g_shil_write_count,
-			g_shil_pvr_write_count, g_shil_sq_write_count);
+			g_shil_pvr_write_count, g_shil_sq_write_count,
+			g_shil_fb_call_count, g_shil_fb_miss_count);
 
 		// Read PVR registers via BOTH paths: ReadMem and direct union
 		u32 fb_r_ctrl_mem = ReadMem32(0xA05F8044);
