@@ -1399,6 +1399,22 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		state_hash2 = 0;
 		state_hash3 = 0;
 	}
+	// Per-block trace in the divergence range to find exact diverging block
+	if (g_wasm_block_count >= 2360000 && g_wasm_block_count < 2360200) {
+		EM_ASM({ console.log('[BLK-DETAIL] #' + $0 +
+			' pc=0x' + ($1>>>0).toString(16) +
+			' cc=' + ($2|0) +
+			' r0=0x' + ($3>>>0).toString(16) +
+			' r4=0x' + ($4>>>0).toString(16) +
+			' r8=0x' + ($5>>>0).toString(16) +
+			' r15=0x' + ($6>>>0).toString(16) +
+			' T=' + $7 +
+			' pr=0x' + ($8>>>0).toString(16) +
+			' jdyn=0x' + ($9>>>0).toString(16)); },
+			g_wasm_block_count, ctx.pc, ctx.cycle_counter,
+			ctx.r[0], ctx.r[4], ctx.r[8], ctx.r[15],
+			ctx.sr.T, ctx.pr, ctx.jdyn);
+	}
 #endif
 }
 
