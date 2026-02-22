@@ -1184,8 +1184,9 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	state_hash3 = state_hash3 * 1000003u + sh3;
 
 #ifdef __EMSCRIPTEN__
-	// 500K TRACE intervals for all modes (comparing mode 1 vs mode 4 hashes)
-	bool should_log = (g_wasm_block_count % 500000 == 0);
+	// Fine-grained TRACE in 2M-3M range (50K intervals), 500K elsewhere
+	bool should_log = (g_wasm_block_count % 500000 == 0) ||
+		(g_wasm_block_count >= 2000000 && g_wasm_block_count <= 3000000 && g_wasm_block_count % 50000 == 0);
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
