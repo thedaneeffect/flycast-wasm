@@ -714,13 +714,44 @@ static void ref_execute_block(RuntimeBlockInfo* block) {
 		int cc_before_iread = ctx.cycle_counter;
 		u16 op = IReadMem16(pc);
 		int cc_after_iread = ctx.cycle_counter;
+#ifdef __EMSCRIPTEN__
+		// Log per-instruction cycle_counter drift for target block near divergence
+		if (block->vaddr == 0x8c00b63c &&
+			g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
+			int cc_delta_iread = cc_before_iread - cc_after_iread;
+			EM_ASM({ console.log('[REF-INSTR] blk=' + $0 +
+				' n=' + $1 +
+				' pc=0x' + ($2>>>0).toString(16) +
+				' op=0x' + ($3>>>0).toString(16) +
+				' cc_before=' + $4 +
+				' cc_after_iread=' + $5 +
+				' iread_cost=' + $6); },
+				g_wasm_block_count, n, pc, op,
+				cc_before_iread, cc_after_iread, cc_delta_iread);
+		}
+#endif
 		if (ctx.sr.FD == 1 && OpDesc[op]->IsFloatingPoint()) {
 			Do_Exception(pc, Sh4Ex_FpuDisabled);
 			return;
 		}
 		actual_iters++;
 		// Always execute instructions — OpPtr handles branches, memory, registers
+		int cc_before_op = ctx.cycle_counter;
 		OpPtr[op](&ctx, op);
+#ifdef __EMSCRIPTEN__
+		if (block->vaddr == 0x8c00b63c &&
+			g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
+			int cc_after_op = ctx.cycle_counter;
+			int cc_delta_op = cc_before_op - cc_after_op;
+			EM_ASM({ console.log('[REF-INSTR-POST] blk=' + $0 +
+				' n=' + $1 +
+				' cc_after_op=' + $2 +
+				' op_cost=' + $3 +
+				' r0=0x' + ($4>>>0).toString(16)); },
+				g_wasm_block_count, n,
+				cc_after_op, cc_delta_op, ctx.r[0]);
+		}
+#endif
 #if EXECUTOR_MODE == 0
 		ctx.cycle_counter -= 1;
 #endif
@@ -1055,33 +1086,47 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		}
 	}
 #else
-	// SHIL executor with instruction fetch cache simulation.
-	// ref_execute_block (mode 4) calls IReadMem16 per instruction, which
-	// charges SH4 instruction cache miss penalties to cycle_counter.
-	// SHIL ops don't fetch instructions, so without pre-fetching,
-	// cycle_counter stays flat during block execution. Timer reads
-	// (TCNT0 etc.) are lazily computed from cycle_counter via now(),
-	// so the missing cache penalties cause timer values to diverge.
-	// Fix: pre-fetch all SH4 instructions before SHIL execution to
-	// charge the same instruction cache penalties as ref_execute_block.
+	// SHIL executor — clean version with diagnostic logging.
 	{
 		int cc_pre = ctx.cycle_counter;
 		ctx.cycle_counter -= block->guest_cycles;
-
-		// Pre-fetch SH4 instructions — charges instruction cache miss
-		// penalties to cycle_counter, matching ref_execute_block's behavior
-		{
-			u32 pc_iter = block->vaddr;
-			u32 pc_end = block->vaddr + block->sh4_code_size;
-			while (pc_iter < pc_end) {
-				IReadMem16(pc_iter);
-				pc_iter += 2;
-			}
-		}
-
 		g_ifb_exception_pending = false;
-		for (u32 i = 0; i < block->oplist.size(); i++)
+#ifdef __EMSCRIPTEN__
+		if (block->vaddr == 0x8c00b63c &&
+			g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
+			EM_ASM({ console.log('[SHIL-BLOCK] blk=' + $0 +
+				' cc_pre=' + $1 +
+				' cc_charged=' + $2 +
+				' gc=' + $3); },
+				g_wasm_block_count, cc_pre,
+				ctx.cycle_counter, block->guest_cycles);
+		}
+#endif
+		for (u32 i = 0; i < block->oplist.size(); i++) {
+#ifdef __EMSCRIPTEN__
+			if (block->vaddr == 0x8c00b63c &&
+				g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
+				EM_ASM({ console.log('[SHIL-OP-PRE] blk=' + $0 +
+					' op=' + $1 +
+					' cc=' + $2 +
+					' r0=0x' + ($3>>>0).toString(16)); },
+					g_wasm_block_count, i,
+					ctx.cycle_counter, ctx.r[0]);
+			}
+#endif
 			wasm_exec_shil_fb(block->vaddr, i);
+#ifdef __EMSCRIPTEN__
+			if (block->vaddr == 0x8c00b63c &&
+				g_wasm_block_count >= 3217940 && g_wasm_block_count <= 3217950) {
+				EM_ASM({ console.log('[SHIL-OP-POST] blk=' + $0 +
+					' op=' + $1 +
+					' cc=' + $2 +
+					' r0=0x' + ($3>>>0).toString(16)); },
+					g_wasm_block_count, i,
+					ctx.cycle_counter, ctx.r[0]);
+			}
+#endif
+		}
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
