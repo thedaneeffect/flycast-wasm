@@ -826,30 +826,27 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		// Use ref's own PC (not applyBlockExitCpp)
 	} else {
-		// Mode 3 SHIL path with diagnostic shadow for first N blocks after switchover.
-		// For first 20 SHIL blocks: run ref first, then SHIL, compare results.
-		// After that: pure SHIL.
+		// Mode 3 SHIL path with FULL binary comparison for first N blocks.
+		// Compares ALL 512 bytes of Sh4Context (not just known registers).
+		// This catches: old_sr, old_fpscr, sq_buffer, temp_reg, interrupt_pend.
 		u32 shil_idx = g_wasm_block_count - SHIL_START_BLOCK;
-		bool diag = (shil_idx < 20);
+		static u32 diag_diff_count = 0;
+		bool diag = (shil_idx < 2000 && diag_diff_count < 50);
 
 		if (diag) {
-			// === DIAGNOSTIC SHADOW: run BOTH ref and SHIL, compare ===
 			// Save pre-block state
 			alignas(16) static u8 diag_backup[sizeof(Sh4Context)];
 			memcpy(diag_backup, &ctx, sizeof(Sh4Context));
 
-			// Run ref (correct)
+			// Run ref
 			int cc_pre = ctx.cycle_counter;
 			ctx.cycle_counter -= block->guest_cycles;
 			ref_execute_block(block);
 			ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
-			u32 ref_pc = ctx.pc;
-			u32 ref_jdyn = ctx.jdyn;
 
 			// Save ref result
 			alignas(16) static u8 diag_ref[sizeof(Sh4Context)];
 			memcpy(diag_ref, &ctx, sizeof(Sh4Context));
-			Sh4Context& ref_ctx = *(Sh4Context*)diag_ref;
 
 			// Restore pre-block state for SHIL
 			memcpy(&ctx, diag_backup, sizeof(Sh4Context));
@@ -857,86 +854,120 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			// Run SHIL
 			cc_pre = ctx.cycle_counter;
 			ctx.cycle_counter -= block->guest_cycles;
-			u32 jdyn_before = ctx.jdyn;
 			g_ifb_exception_pending = false;
 			for (u32 i = 0; i < block->oplist.size(); i++)
 				wasm_exec_shil_fb(block->vaddr, i);
 			ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
-			u32 jdyn_after = ctx.jdyn;
 			applyBlockExitCpp(block);
-			u32 shil_pc = ctx.pc;
-
-			// Check if shop_jdyn is in the oplist
-			bool has_jdyn = false;
-			for (u32 i = 0; i < block->oplist.size(); i++) {
-				if (block->oplist[i].op == shop_jdyn) has_jdyn = true;
+			if (g_ifb_exception_pending) {
+				Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+				g_ifb_exception_pending = false;
 			}
 
-			// Log comparison
+			// Full binary comparison of ALL 512 bytes
+			const u8* ref_bytes = (const u8*)diag_ref;
+			const u8* shil_bytes = (const u8*)&ctx;
+			// Skip offsets: cycle_counter (0x174, 4 bytes) and doSqWrite pointer (0x178, 4 bytes)
+			bool any_diff = false;
+			int first_diff_off = -1;
+			u32 first_diff_ref = 0, first_diff_shil = 0;
+			int diff_count = 0;
+			for (int off = 0; off < (int)sizeof(Sh4Context); off += 4) {
+				// Skip cycle_counter and doSqWrite
+				if (off == 0x174 || off == 0x178) continue;
+				u32 rv = *(u32*)(ref_bytes + off);
+				u32 sv = *(u32*)(shil_bytes + off);
+				if (rv != sv) {
+					diff_count++;
+					if (!any_diff) {
+						any_diff = true;
+						first_diff_off = off;
+						first_diff_ref = rv;
+						first_diff_shil = sv;
+					}
+				}
+			}
 #ifdef __EMSCRIPTEN__
-			EM_ASM({ console.log('[DIAG] shil_idx=' + $0 +
-				' blk_pc=0x' + ($1>>>0).toString(16) +
-				' bt=' + $2 +
-				' ref_pc=0x' + ($3>>>0).toString(16) +
-				' shil_pc=0x' + ($4>>>0).toString(16) +
-				' MATCH=' + ($3 == $4 ? 'YES' : '***NO***') +
-				' jdyn_before=0x' + ($5>>>0).toString(16) +
-				' jdyn_after=0x' + ($6>>>0).toString(16) +
-				' ref_jdyn=0x' + ($7>>>0).toString(16) +
-				' has_jdyn=' + $8 +
-				' nops=' + $9 +
-				' branch=0x' + ($10>>>0).toString(16) +
-				' next=0x' + ($11>>>0).toString(16)); },
-				shil_idx, block->vaddr, (int)block->BlockType,
-				ref_pc, shil_pc,
-				jdyn_before, jdyn_after, ref_jdyn,
-				has_jdyn ? 1 : 0,
-				(u32)block->oplist.size(),
-				block->BranchBlock, block->NextBlock);
+			if (any_diff) {
+				diag_diff_count++;
+				// Map offset to field name
+				const char* field_name = "unknown";
+				if (first_diff_off < 0x20) field_name = "sq_buffer[0]";
+				else if (first_diff_off < 0x40) field_name = "sq_buffer[1]";
+				else if (first_diff_off < 0x80) field_name = "xf";
+				else if (first_diff_off < 0xC0) field_name = "fr";
+				else if (first_diff_off < 0x100) field_name = "r";
+				else if (first_diff_off == 0x100) field_name = "mac.l";
+				else if (first_diff_off == 0x104) field_name = "mac.h";
+				else if (first_diff_off < 0x128) field_name = "r_bank";
+				else if (first_diff_off == 0x128) field_name = "gbr";
+				else if (first_diff_off == 0x12C) field_name = "ssr";
+				else if (first_diff_off == 0x130) field_name = "spc";
+				else if (first_diff_off == 0x134) field_name = "sgr";
+				else if (first_diff_off == 0x138) field_name = "dbr";
+				else if (first_diff_off == 0x13C) field_name = "vbr";
+				else if (first_diff_off == 0x140) field_name = "pr";
+				else if (first_diff_off == 0x144) field_name = "fpul";
+				else if (first_diff_off == 0x148) field_name = "pc";
+				else if (first_diff_off == 0x14C) field_name = "jdyn";
+				else if (first_diff_off == 0x150) field_name = "sr.status";
+				else if (first_diff_off == 0x154) field_name = "sr.T";
+				else if (first_diff_off == 0x158) field_name = "fpscr";
+				else if (first_diff_off == 0x15C) field_name = "old_sr";
+				else if (first_diff_off == 0x160) field_name = "old_fpscr";
+				else if (first_diff_off == 0x164) field_name = "CpuRunning";
+				else if (first_diff_off == 0x168) field_name = "sh4_sched_next";
+				else if (first_diff_off == 0x16C) field_name = "interrupt_pend";
+				else if (first_diff_off == 0x170) field_name = "temp_reg";
 
-			// If mismatch, dump register diffs
-			if (ref_pc != shil_pc) {
-				EM_ASM({ console.log('[DIAG-REG] r0=0x' + ($0>>>0).toString(16) +
-					'/0x' + ($1>>>0).toString(16) +
-					' r4=0x' + ($2>>>0).toString(16) +
-					'/0x' + ($3>>>0).toString(16) +
-					' r15=0x' + ($4>>>0).toString(16) +
-					'/0x' + ($5>>>0).toString(16) +
-					' T=' + $6 + '/' + $7 +
-					' pr=0x' + ($8>>>0).toString(16) +
-					'/0x' + ($9>>>0).toString(16)); },
-					ref_ctx.r[0], ctx.r[0],
-					ref_ctx.r[4], ctx.r[4],
-					ref_ctx.r[15], ctx.r[15],
-					ref_ctx.sr.T, ctx.sr.T,
-					ref_ctx.pr, ctx.pr);
+				EM_ASM({ console.log('[DIAG-FULL] #' + $0 +
+					' blk_pc=0x' + ($1>>>0).toString(16) +
+					' bt=' + $2 +
+					' diffs=' + $3 +
+					' first_off=0x' + ($4>>>0).toString(16) +
+					' field=' + UTF8ToString($5) +
+					' ref=0x' + ($6>>>0).toString(16) +
+					' shil=0x' + ($7>>>0).toString(16) +
+					' nops=' + $8); },
+					shil_idx, block->vaddr, (int)block->BlockType,
+					diff_count, first_diff_off, field_name,
+					first_diff_ref, first_diff_shil,
+					(u32)block->oplist.size());
 
-				// Dump the SHIL oplist
-				for (u32 i = 0; i < block->oplist.size() && i < 30; i++) {
-					auto& sop = block->oplist[i];
-					EM_ASM({ console.log('[DIAG-OP] [' + $0 + '] shop=' + $1 +
-						' rd=' + $2 + ':0x' + ($3>>>0).toString(16) +
-						' rs1=' + $4 + ':0x' + ($5>>>0).toString(16) +
-						' rs2=' + $6 + ':0x' + ($7>>>0).toString(16) +
-						' size=' + $8); },
-						i, (int)sop.op,
-						(int)sop.rd.type, sop.rd._imm,
-						(int)sop.rs1.type, sop.rs1._imm,
-						(int)sop.rs2.type, sop.rs2._imm,
-						sop.size);
+				// For first 10 diffs, also dump all differing offsets
+				if (diag_diff_count <= 10) {
+					for (int off = 0; off < (int)sizeof(Sh4Context); off += 4) {
+						if (off == 0x174 || off == 0x178) continue;
+						u32 rv = *(u32*)(ref_bytes + off);
+						u32 sv = *(u32*)(shil_bytes + off);
+						if (rv != sv) {
+							EM_ASM({ console.log('[DIAG-DIFF] off=0x' + ($0>>>0).toString(16) +
+								' ref=0x' + ($1>>>0).toString(16) +
+								' shil=0x' + ($2>>>0).toString(16)); },
+								off, rv, sv);
+						}
+					}
+					// Dump oplist
+					for (u32 i = 0; i < block->oplist.size() && i < 30; i++) {
+						auto& sop = block->oplist[i];
+						EM_ASM({ console.log('[DIAG-OP] [' + $0 + '] shop=' + $1 +
+							' rd_type=' + $2 + ' rd_imm=0x' + ($3>>>0).toString(16) +
+							' rs1_type=' + $4 + ' rs1_imm=0x' + ($5>>>0).toString(16) +
+							' rs2_type=' + $6 + ' rs2_imm=0x' + ($7>>>0).toString(16) +
+							' size=' + $8); },
+							i, (int)sop.op,
+							(int)sop.rd.type, sop.rd._imm,
+							(int)sop.rs1.type, sop.rs1._imm,
+							(int)sop.rs2.type, sop.rs2._imm,
+							sop.size);
+					}
 				}
 			}
 #endif
-			// Use ref's result to continue (so next block starts from correct state)
+			// Restore ref's result
 			memcpy(&ctx, diag_ref, sizeof(Sh4Context));
-
-			if (g_ifb_exception_pending) {
-				// Still need to handle deferred exceptions from SHIL
-				// but since we restored ref, just clear it
-				g_ifb_exception_pending = false;
-			}
 		} else {
-			// Pure SHIL (no diagnostic)
+			// Pure SHIL
 			int cc_pre = ctx.cycle_counter;
 			ctx.cycle_counter -= block->guest_cycles;
 			g_ifb_exception_pending = false;
