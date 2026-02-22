@@ -64,6 +64,10 @@ double wasm_prof_compile_ms();
 double wasm_prof_exec_sample_ms();
 int wasm_prof_exec_samples();
 int wasm_prof_exec_count();
+int wasm_run_slice(u32 ctx_ptr, u32 ram_base);
+int wasm_slice_result();
+int wasm_slice_miss_pc();
+int wasm_slice_trap_pc();
 }
 #endif
 
@@ -1386,6 +1390,79 @@ EM_JS(int, wasm_prof_exec_count, (), {
 	return Module._prof ? Module._prof.execCount : 0;
 });
 
+// JS dispatch loop: runs compiled WASM blocks in a tight JS loop,
+// eliminating C++<->JS boundary crossing per block (~385K/mainloop -> one per timeslice).
+// Returns number of blocks executed. Module._sliceResult indicates exit reason:
+//   0 = timeslice complete (cycle_counter <= 0)
+//   1 = cache miss (Module._sliceMissPC = PC needing compilation)
+//   2 = WASM trap (Module._sliceTrapPC = PC that trapped)
+//   3 = interrupt pending (needs C++ UpdateINTC)
+EM_JS(int, wasm_run_slice, (u32 ctx_ptr, u32 ram_base), {
+	var cache = Module._wasmBlockCache;
+	if (!cache) { Module._sliceResult = 0; return 0; }
+
+	var pcIdx = (ctx_ptr + 0x148) >>> 2;
+	var ccIdx = (ctx_ptr + 0x174) >>> 2;
+	var intIdx = (ctx_ptr + 0x16C) >>> 2;
+
+	if (!Module._prof) Module._prof = { compileMs: 0, execMs: 0, execSamples: 0, execCount: 0 };
+	Module._sliceResult = 0;
+	var blocksRun = 0;
+
+	while (true) {
+		var mem = Module.HEAPU32;
+		if ((mem[ccIdx] | 0) <= 0) break;
+
+		var pc = mem[pcIdx] | 0;  // signed i32 to match EM_JS cache keys
+		var fn = cache[pc];
+
+		if (!fn) {
+			Module._sliceResult = 1;
+			Module._sliceMissPC = pc;
+			return blocksRun;
+		}
+
+		try {
+			Module._prof.execCount++;
+			if ((Module._prof.execCount & 0x3FF) === 0) {
+				var t0 = performance.now();
+				fn(ctx_ptr, ram_base);
+				Module._prof.execMs += performance.now() - t0;
+				Module._prof.execSamples++;
+			} else {
+				fn(ctx_ptr, ram_base);
+			}
+		} catch (e) {
+			Module._sliceResult = 2;
+			Module._sliceTrapPC = pc;
+			return blocksRun;
+		}
+
+		blocksRun++;
+
+		mem = Module.HEAPU32;
+		if (mem[intIdx]) {
+			Module._sliceResult = 3;
+			return blocksRun;
+		}
+	}
+
+	Module._sliceResult = 0;
+	return blocksRun;
+});
+
+EM_JS(int, wasm_slice_result, (), {
+	return Module._sliceResult || 0;
+});
+
+EM_JS(int, wasm_slice_miss_pc, (), {
+	return Module._sliceMissPC || 0;
+});
+
+EM_JS(int, wasm_slice_trap_pc, (), {
+	return Module._sliceTrapPC || 0;
+});
+
 #else
 static int wasm_compile_block(const u8*, u32, u32) { return 0; }
 static int wasm_execute_block(u32, u32, u32) { return 0; }
@@ -1397,6 +1474,10 @@ static double wasm_prof_compile_ms() { return 0; }
 static double wasm_prof_exec_sample_ms() { return 0; }
 static int wasm_prof_exec_samples() { return 0; }
 static int wasm_prof_exec_count() { return 0; }
+static int wasm_run_slice(u32, u32) { return 0; }
+static int wasm_slice_result() { return 0; }
+static int wasm_slice_miss_pc() { return 0; }
+static int wasm_slice_trap_pc() { return 0; }
 #endif
 
 // ============================================================
@@ -1573,46 +1654,73 @@ public:
 			do {
 				try {
 					double emu_t0 = emscripten_get_now();
-					do {
-						u32 pc = sh4ctx->pc;
-						auto it = blockByVaddr.find(pc);
+					u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
+					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
-						if (it == blockByVaddr.end()) {
-							rdv_FailedToFindBlock(pc);
-							it = blockByVaddr.find(pc);
+					while (sh4ctx->cycle_counter > 0) {
+						int nblocks = wasm_run_slice(ctx_ptr, ram_ptr);
+						blockExecs += nblocks;
+						g_wasm_block_count += nblocks;
+
+						int result = wasm_slice_result();
+#ifdef __EMSCRIPTEN__
+						static u32 slice_diag_count = 0;
+						if (slice_diag_count < 30) {
+							u32 dpc = sh4ctx->pc;
+							EM_ASM({ console.log("[SLICE] #" + $0 +
+								" result=" + $1 +
+								" nblocks=" + $2 +
+								" cc=" + $3 +
+								" pc=0x" + ($4>>>0).toString(16) +
+								" cache=" + $5); },
+								slice_diag_count, result, nblocks,
+								sh4ctx->cycle_counter, dpc, wasm_cache_size());
+							slice_diag_count++;
 						}
+#endif
 
-						if (it != blockByVaddr.end()) {
-							// SMC check: verify first opcode hasn't changed
-							auto hit = blockCodeHash.find(pc);
-							if (hit != blockCodeHash.end()) {
-								u32 curOp = (u32)IReadMem16(pc);
-								if (curOp != hit->second) {
-									wasm_remove_block(pc);
-									blockCodeHash.erase(pc);
-									blockByVaddr.erase(pc);
-									it = blockByVaddr.end();
+						if (result == 0) {
+							break;  // timeslice complete
+						} else if (result == 1) {
+							// Cache miss - compile the block
+							u32 miss_pc = (u32)wasm_slice_miss_pc();
+							auto it = blockByVaddr.find(miss_pc);
+							if (it == blockByVaddr.end()) {
+								rdv_FailedToFindBlock(miss_pc);
+								it = blockByVaddr.find(miss_pc);
+							}
+							if (it == blockByVaddr.end()) {
+								sh4ctx->pc = miss_pc + 2;
+								u16 rawOp = IReadMem16(miss_pc);
+								if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
+									throw SH4ThrownException(miss_pc, Sh4Ex_FpuDisabled);
+								OpPtr[rawOp](sh4ctx, rawOp);
+								sh4ctx->cycle_counter -= 1;
+								interpExecs++;
+							}
+						} else if (result == 2) {
+							// WASM trap - C++ fallback for this block
+							u32 trap_pc = (u32)wasm_slice_trap_pc();
+							auto it = blockByVaddr.find(trap_pc);
+							if (it != blockByVaddr.end()) {
+								RuntimeBlockInfo* block = it->second;
+								g_ifb_exception_pending = false;
+								sh4ctx->cycle_counter -= block->guest_cycles;
+								for (u32 i = 0; i < block->oplist.size(); i++)
+									wasm_exec_shil_fb(block->vaddr, i);
+								applyBlockExitCpp(block);
+								g_wasm_block_count++;
+								blockExecs++;
+								if (g_ifb_exception_pending) {
+									Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+									g_ifb_exception_pending = false;
 								}
 							}
+						} else if (result == 3) {
+							// Interrupt pending
+							UpdateINTC();
 						}
-
-						if (it != blockByVaddr.end()) {
-							cpp_execute_block(it->second);
-							blockExecs++;
-
-							if (sh4ctx->interrupt_pend)
-								UpdateINTC();
-						} else {
-							sh4ctx->pc = pc + 2;
-							u16 op = IReadMem16(pc);
-							if (sh4ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
-								throw SH4ThrownException(pc, Sh4Ex_FpuDisabled);
-							OpPtr[op](sh4ctx, op);
-							sh4ctx->cycle_counter -= 1;
-							interpExecs++;
-						}
-
-					} while (sh4ctx->cycle_counter > 0);
+					}
 
 					double emu_t1 = emscripten_get_now();
 					prof_emulation_ms += (emu_t1 - emu_t0);
