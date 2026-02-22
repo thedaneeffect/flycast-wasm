@@ -31,6 +31,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "hw/sh4/sh4_rom.h"  // sin_table for FSCA
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -288,7 +290,7 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 	// FPU ops
 	case shop_fmac: {
 		float fn = readF32(op.rs1), f0 = readF32(op.rs2), fm = readF32(op.rs3);
-		writeF32(op.rd, fn + f0 * fm);
+		writeF32(op.rd, std::fma(f0, fm, fn));
 		break;
 	}
 	case shop_fsrra: {
@@ -297,32 +299,30 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		break;
 	}
 	case shop_fipr: {
-		// 4-element dot product: sum of rs1[i] * rs2[i]
-		float sum = 0;
+		// 4-element dot product with double accumulation (matches canonical)
 		u32 off1 = op.rs1.reg_offset(), off2 = op.rs2.reg_offset();
+		double sum = 0;
 		for (int i = 0; i < 4; i++) {
 			float a = *(float*)((u8*)&ctx + off1 + i * 4);
 			float b = *(float*)((u8*)&ctx + off2 + i * 4);
-			sum += a * b;
+			sum += (double)a * (double)b;
 		}
-		writeF32(op.rd, sum);
+		writeF32(op.rd, (float)sum);
 		break;
 	}
 	case shop_ftrv: {
-		// 4x4 matrix * 4-element vector (column-major, matches canonical)
-		// rs1 = vector (4 floats), rs2 = matrix (16 floats, column-major)
+		// 4x4 matrix * 4-element vector with double accumulation (matches canonical)
 		u32 voff = op.rs1.reg_offset(), moff = op.rs2.reg_offset();
-		float result[4] = {0, 0, 0, 0};
+		u32 doff = op.rd.reg_offset();
 		for (int i = 0; i < 4; i++) {
+			double sum = 0;
 			for (int j = 0; j < 4; j++) {
 				float m = *(float*)((u8*)&ctx + moff + (j * 4 + i) * 4);
 				float v = *(float*)((u8*)&ctx + voff + j * 4);
-				result[i] += m * v;
+				sum += (double)m * (double)v;
 			}
+			*(float*)((u8*)&ctx + doff + i * 4) = (float)sum;
 		}
-		u32 doff = op.rd.reg_offset();
-		for (int i = 0; i < 4; i++)
-			*(float*)((u8*)&ctx + doff + i * 4) = result[i];
 		break;
 	}
 	case shop_frswap: {
@@ -336,10 +336,10 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 	}
 	case shop_fsca: {
 		u32 angle = readI32(op.rs1);
-		float rad = (float)(angle & 0xFFFF) * (2.0f * 3.14159265f / 65536.0f);
+		u32 pi_index = angle & 0xFFFF;
 		u32 doff = op.rd.reg_offset();
-		*(float*)((u8*)&ctx + doff) = sinf(rad);
-		*(float*)((u8*)&ctx + doff + 4) = cosf(rad);
+		*(float*)((u8*)&ctx + doff) = sin_table[pi_index].u[0];
+		*(float*)((u8*)&ctx + doff + 4) = sin_table[pi_index].u[1];
 		break;
 	}
 	// ---- Tier 1/2 basic ops (needed when WASM emitters are disabled for debugging) ----
