@@ -269,10 +269,10 @@ index 4fbb9a5..be30d56 100644
  			|| (!render_called && fb_dirty && FB_R_CTRL.fb_enable))
  	{
 diff --git a/core/hw/pvr/pvr_regs.cpp b/core/hw/pvr/pvr_regs.cpp
-index 0538b3c..08a6fc3 100644
+index 0538b3c..7379db7 100644
 --- a/core/hw/pvr/pvr_regs.cpp
 +++ b/core/hw/pvr/pvr_regs.cpp
-@@ -1,254 +1,271 @@
+@@ -1,254 +1,284 @@
 -#include "pvr_regs.h"
 -#include "pvr_mem.h"
 -#include "Renderer_if.h"
@@ -535,6 +535,8 @@ index 0538b3c..08a6fc3 100644
 +#include <map>
 +#ifdef __EMSCRIPTEN__
 +#include <emscripten.h>
++#include "hw/sh4/sh4_core.h"  // for Sh4cntx (sh4ctx->pc)
++extern u32 g_wasm_block_count;
 +#endif
 +
 +bool pal_needs_update=true;
@@ -661,6 +663,16 @@ index 0538b3c..08a6fc3 100644
 +		return; // read only
 +
 +	case STARTRENDER_addr:
++#ifdef __EMSCRIPTEN__
++		{
++			static int startrender_count = 0;
++			startrender_count++;
++			EM_ASM({ console.log('[STARTRENDER] #' + $0 +
++				' blk=' + $1 +
++				' pc=0x' + ($2>>>0).toString(16)); },
++				startrender_count, g_wasm_block_count, p_sh4rcb->cntx.pc);
++		}
++#endif
 +		rend_start_render();
 +		YUV_init();
 +		return;
@@ -699,15 +711,16 @@ index 0538b3c..08a6fc3 100644
 +			static int fb_r_ctrl_write_count = 0;
 +			fb_r_ctrl_write_count++;
 +			u32 old_val = PvrReg(addr, u32);
-+			// Log every write to FB_R_CTRL (critical for rendering)
-+			if (fb_r_ctrl_write_count <= 50 || (data & 1) != (old_val & 1)) {
-+				EM_ASM({ console.log('[FB_R_CTRL-WR] #' + $0 +
-+					' old=0x' + ($1>>>0).toString(16) +
-+					' new=0x' + ($2>>>0).toString(16) +
-+					' fb_enable_old=' + ($1 & 1) +
-+					' fb_enable_new=' + ($2 & 1)); },
-+					fb_r_ctrl_write_count, old_val, data);
-+			}
++			u32 sh4_pc = p_sh4rcb->cntx.pc;
++			// Log ALL writes to FB_R_CTRL with block count and SH4 PC
++			EM_ASM({ console.log('[FB_R_CTRL-WR] #' + $0 +
++				' blk=' + $1 +
++				' pc=0x' + ($2>>>0).toString(16) +
++				' old=0x' + ($3>>>0).toString(16) +
++				' new=0x' + ($4>>>0).toString(16) +
++				' fb_enable: ' + ($3 & 1) + '->' + ($4 & 1)); },
++				fb_r_ctrl_write_count, g_wasm_block_count, sh4_pc,
++				old_val, data);
 +#endif
 +			bool vclk_div_changed = (PvrReg(addr, u32) ^ data) & (1 << 23);
 +			PvrReg(addr, u32) = data;

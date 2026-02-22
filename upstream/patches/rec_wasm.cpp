@@ -774,10 +774,10 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 // 4 = ref execution + SHIL-style charging (isolates timing vs computation)
 // 5 = shadow comparison: ref first, then SHIL, compare registers
 // 6 = pure SHIL with PVR register monitoring + write counting
-#define EXECUTOR_MODE 1
+#define EXECUTOR_MODE 4
 
 static u32 pc_hash = 0;
-static u32 block_count = 0;
+u32 g_wasm_block_count = 0;  // global so pvr_regs.cpp can reference it
 static u32 state_hash = 0;
 static u32 state_hash2 = 0;
 static u32 state_hash3 = 0;
@@ -794,7 +794,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	// Per-block trace for first 500 blocks (compare between modes)
-	if (block_count < 500) {
+	if (g_wasm_block_count < 500) {
 		EM_ASM({ console.log('[BLK] #' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
 			' cc=' + ($2|0) +
@@ -802,7 +802,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			' r0=0x' + ($4>>>0).toString(16) +
 			' r4=0x' + ($5>>>0).toString(16) +
 			' T=' + $6); },
-			block_count, block->vaddr, ctx.cycle_counter,
+			g_wasm_block_count, block->vaddr, ctx.cycle_counter,
 			block->guest_opcodes, ctx.r[0], ctx.r[4], ctx.sr.T);
 	}
 #endif
@@ -812,7 +812,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	ref_execute_block(block);
 #elif EXECUTOR_MODE == 3
 	// HYBRID: ref for early blocks, SHIL after threshold
-	if (block_count < SHIL_START_BLOCK) {
+	if (g_wasm_block_count < SHIL_START_BLOCK) {
 		// Mode 2 ref path (known PASS): guest_opcodes upfront + ref with natural leak
 		ctx.cycle_counter -= block->guest_opcodes;
 		ref_execute_block(block);
@@ -838,12 +838,12 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 		int total_charge = cc_pre - cc_post;
 		int leak = total_charge - block->guest_opcodes;
 #ifdef __EMSCRIPTEN__
-		if (block_count < 100) {
+		if (g_wasm_block_count < 100) {
 			EM_ASM({ console.log('[CHARGE] #' + $0 +
 				' go=' + $1 + ' gc=' + $2 +
 				' total=' + $3 + ' leak=' + $4 +
 				' bt=' + $5); },
-				block_count, block->guest_opcodes, block->guest_cycles,
+				g_wasm_block_count, block->guest_opcodes, block->guest_cycles,
 				total_charge, leak, (int)block->BlockType);
 		}
 #endif
@@ -966,7 +966,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 					' ref=0x' + ($6>>>0).toString(16) +
 					' nops=' + $7 +
 					' go=' + $8); },
-					shadow_mismatch_count, block_count, block->vaddr,
+					shadow_mismatch_count, g_wasm_block_count, block->vaddr,
 					diff_name, diff_reg, shil_v, ref_v,
 					(u32)block->oplist.size(), block->guest_opcodes);
 
@@ -1060,34 +1060,34 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	// CC-SUMMARY for ALL modes
-	if (block_count == 100000 || block_count == 500000 || block_count == 1000000 ||
-	    block_count == 2000000 || block_count == 2360000 || block_count == 2360114) {
+	if (g_wasm_block_count == 100000 || g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 ||
+	    g_wasm_block_count == 2000000 || g_wasm_block_count == 2360000 || g_wasm_block_count == 2360114) {
 		EM_ASM({ console.log('[CC-SUMMARY] blk=' + $0 +
 			' cc=' + ($1|0) +
 			' mode=' + $2); },
-			block_count, ctx.cycle_counter, EXECUTOR_MODE);
+			g_wasm_block_count, ctx.cycle_counter, EXECUTOR_MODE);
 	}
 #if EXECUTOR_MODE == 5
-	if (block_count == 1000 || block_count == 10000 || block_count == 100000 ||
-	    block_count == 500000 || block_count == 1000000 || block_count == 2000000) {
+	if (g_wasm_block_count == 1000 || g_wasm_block_count == 10000 || g_wasm_block_count == 100000 ||
+	    g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 || g_wasm_block_count == 2000000) {
 		EM_ASM({ console.log('[SHADOW-SUM] at blk=' + $0 +
 			' match=' + $1 + ' mismatch=' + $2 +
 			' rate=' + (($1 > 0) ? (100.0 * $1 / ($1 + $2)).toFixed(2) : '0') + '%'); },
-			block_count, shadow_match_count, shadow_mismatch_count);
+			g_wasm_block_count, shadow_match_count, shadow_mismatch_count);
 	}
 #endif
 #if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5 || EXECUTOR_MODE == 1
-	if (block_count == 500000 || block_count == 1000000 || block_count == 2000000 ||
-	    block_count == 2500000 ||
-	    block_count == 5000000 || block_count == 10000000 ||
-	    block_count == 15000000 || block_count == 20000000 ||
-	    block_count == 25000000 || block_count == 30000000 ||
-	    block_count == 40000000 || block_count == 50000000) {
+	if (g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 || g_wasm_block_count == 2000000 ||
+	    g_wasm_block_count == 2500000 ||
+	    g_wasm_block_count == 5000000 || g_wasm_block_count == 10000000 ||
+	    g_wasm_block_count == 15000000 || g_wasm_block_count == 20000000 ||
+	    g_wasm_block_count == 25000000 || g_wasm_block_count == 30000000 ||
+	    g_wasm_block_count == 40000000 || g_wasm_block_count == 50000000) {
 		EM_ASM({ console.log('[SHIL-IO] blk=' + $0 +
 			' reads=' + $1 + ' writes=' + $2 +
 			' pvr_wr=' + $3 + ' sq_wr=' + $4 +
 			' fb_calls=' + $5 + ' fb_miss=' + $6); },
-			block_count, g_shil_read_count, g_shil_write_count,
+			g_wasm_block_count, g_shil_read_count, g_shil_write_count,
 			g_shil_pvr_write_count, g_shil_sq_write_count,
 			g_shil_fb_call_count, g_shil_fb_miss_count);
 
@@ -1106,13 +1106,13 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			' SPG=0x' + ($4>>>0).toString(16) +
 			' SOF1=0x' + ($5>>>0).toString(16) +
 			' SOF2=0x' + ($6>>>0).toString(16)); },
-			block_count, fb_r_ctrl_mem, fb_r_ctrl_union,
+			g_wasm_block_count, fb_r_ctrl_mem, fb_r_ctrl_union,
 			fb_w_ctrl, spg_ctrl, fb_r_sof1, fb_r_sof2);
 	}
 #endif
 #endif
 
-	block_count++;
+	g_wasm_block_count++;
 
 	// (post-execution diagnostic removed — no longer needed)
 
@@ -1150,7 +1150,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	// 500K TRACE intervals for all modes (comparing mode 1 vs mode 4 hashes)
-	bool should_log = (block_count % 500000 == 0);
+	bool should_log = (g_wasm_block_count % 500000 == 0);
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
 			' pc=0x' + ($1>>>0).toString(16) +
@@ -1160,7 +1160,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			' hC=0x' + ($5>>>0).toString(16) +
 			' r0=0x' + ($6>>>0).toString(16) +
 			' T=' + $7); },
-			block_count, ctx.pc, pc_hash,
+			g_wasm_block_count, ctx.pc, pc_hash,
 			state_hash, state_hash2, state_hash3,
 			ctx.r[0], ctx.sr.T);
 		pc_hash = 0;
