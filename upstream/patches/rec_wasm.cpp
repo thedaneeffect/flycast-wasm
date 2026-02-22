@@ -1127,13 +1127,11 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 
 #ifdef __EMSCRIPTEN__
 	bool should_log = false;
-	if (block_count <= 2000000) {
-		should_log = (block_count % 500000 == 0);
+	if (block_count >= 2360000 && block_count <= 2370000) {
+		// Per-block: divergence happens in this exact window
+		should_log = true;
 	} else if (block_count <= 2500000) {
-		// Fine-grained: divergence happens in this window
-		should_log = (block_count % 10000 == 0);
-	} else {
-		should_log = (block_count % 5000000 == 0);
+		should_log = (block_count % 100000 == 0);
 	}
 	if (should_log) {
 		EM_ASM({ console.log('[TRACE] blk=' + $0 +
