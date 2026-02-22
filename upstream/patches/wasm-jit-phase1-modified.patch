@@ -927,6 +927,25 @@ index 4e1fbf3..4f61459 100644
  }
  
  void Sh4Recompiler::Term()
+diff --git a/core/hw/sh4/dyna/shil.cpp b/core/hw/sh4/dyna/shil.cpp
+index 4ca6b6a..0a43300 100644
+--- a/core/hw/sh4/dyna/shil.cpp
++++ b/core/hw/sh4/dyna/shil.cpp
+@@ -10,7 +10,14 @@
+ void AnalyseBlock(RuntimeBlockInfo* blk)
+ {
+ 	SSAOptimizer optim(blk);
++#ifdef __EMSCRIPTEN__
++	// DIAGNOSTIC: skip all SSA optimizations (constprop, dead code removal,
++	// expression simplification, etc.) to test if SSA causes SHIL divergence.
++	// Only run versioning pass (needed by some analysis code).
++	optim.AddVersionPass();
++#else
+ 	optim.Optimize();
++#endif
+ }
+ 
+ u32 getRegOffset(Sh4RegType reg)
 diff --git a/core/hw/sh4/dyna/shil_canonical.h b/core/hw/sh4/dyna/shil_canonical.h
 index a1be200..3727ab8 100644
 --- a/core/hw/sh4/dyna/shil_canonical.h
