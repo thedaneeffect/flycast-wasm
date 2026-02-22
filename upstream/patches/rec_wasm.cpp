@@ -694,7 +694,8 @@ extern u32 g_wasm_block_count;
 // #if EXECUTOR_MODE == 0 inside the function evaluates correctly.
 // Previously it was defined AFTER, causing undefined-macro = 0 = TRUE,
 // which made per-instruction cycle charging always active in ref_execute_block.
-#define EXECUTOR_MODE 1
+#define EXECUTOR_MODE 3
+#define SHIL_START_BLOCK 2360000
 
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
@@ -810,17 +811,24 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 	// REF executor (per-instruction charging)
 	ref_execute_block(block);
 #elif EXECUTOR_MODE == 3
-	// HYBRID: ref for early blocks, SHIL after threshold
+	// HYBRID: ref (mode 4 path) for early blocks, SHIL (mode 1 path) after threshold.
+	// Both paths use guest_cycles charging with forced reset.
+	// This isolates whether SHIL works correctly when starting from known-good state.
 	if (g_wasm_block_count < SHIL_START_BLOCK) {
-		// Mode 2 ref path (known PASS): guest_opcodes upfront + ref with natural leak
-		ctx.cycle_counter -= block->guest_opcodes;
+		// Mode 4 ref path (known PASS): guest_cycles + ref_execute_block + forced reset
+		int cc_pre = ctx.cycle_counter;
+		ctx.cycle_counter -= block->guest_cycles;
 		ref_execute_block(block);
+		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
+		// Use ref's own PC (not applyBlockExitCpp)
 	} else {
-		// SHIL executor with same effective charging as ref (~2*guest_opcodes)
+		// Mode 1 SHIL path: guest_cycles + SHIL ops + forced reset + applyBlockExitCpp
+		int cc_pre = ctx.cycle_counter;
+		ctx.cycle_counter -= block->guest_cycles;
 		g_ifb_exception_pending = false;
 		for (u32 i = 0; i < block->oplist.size(); i++)
 			wasm_exec_shil_fb(block->vaddr, i);
-		ctx.cycle_counter -= 2 * block->guest_opcodes;
+		ctx.cycle_counter = cc_pre - (int)block->guest_cycles;
 		applyBlockExitCpp(block);
 		if (g_ifb_exception_pending) {
 			Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
@@ -1141,7 +1149,7 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 			g_wasm_block_count, shadow_match_count, shadow_mismatch_count);
 	}
 #endif
-#if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5 || EXECUTOR_MODE == 1
+#if EXECUTOR_MODE == 6 || EXECUTOR_MODE == 4 || EXECUTOR_MODE == 5 || EXECUTOR_MODE == 1 || EXECUTOR_MODE == 3
 	if (g_wasm_block_count == 500000 || g_wasm_block_count == 1000000 || g_wasm_block_count == 2000000 ||
 	    g_wasm_block_count == 2500000 ||
 	    g_wasm_block_count == 5000000 || g_wasm_block_count == 10000000 ||
