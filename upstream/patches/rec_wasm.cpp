@@ -1003,18 +1003,22 @@ static void cpp_execute_block(RuntimeBlockInfo* block) {
 						ref_result.r[15], ref_result.pc, ref_result.sr.T, ref_result.pr);
 
 					// Dump the SHIL ops for this block
+					// NOTE: reg_offset() calls verify(is_reg()) which aborts on null/imm operands.
+					// Use _imm (union member) for raw value regardless of type.
 					for (u32 i = 0; i < block->oplist.size() && i < 30; i++) {
 						auto& sop = block->oplist[i];
 						EM_ASM({ console.log('[SHADOW-OP] [' + $0 + '] shop=' + $1 +
-							' rd_type=' + $2 + ' rd_off=0x' + ($3>>>0).toString(16) +
-							' rs1_type=' + $4 + ' rs1_off=0x' + ($5>>>0).toString(16) +
-							' rs2_type=' + $6 + ' rs3_type=' + $7 +
-							' size=' + $8 + ' imm1=' + $9); },
+							' rd=' + $2 + ':0x' + ($3>>>0).toString(16) +
+							' rs1=' + $4 + ':0x' + ($5>>>0).toString(16) +
+							' rs2=' + $6 + ':0x' + ($7>>>0).toString(16) +
+							' rs3=' + $8 + ':0x' + ($9>>>0).toString(16) +
+							' size=' + $10); },
 							i, (int)sop.op,
-							(int)sop.rd.type, sop.rd.reg_offset(),
-							(int)sop.rs1.type, sop.rs1.reg_offset(),
-							(int)sop.rs2.type, (int)sop.rs3.type,
-							sop.size, sop.rs1._imm);
+							(int)sop.rd.type, sop.rd._imm,
+							(int)sop.rs1.type, sop.rs1._imm,
+							(int)sop.rs2.type, sop.rs2._imm,
+							(int)sop.rs3.type, sop.rs3._imm,
+							sop.size);
 					}
 				}
 #endif
