@@ -114,6 +114,8 @@ static u32 prof_idle_loops_detected = 0;   // blocks detected as idle spin-wait 
 static u32 prof_multiblock_modules = 0;   // multi-block super-block modules compiled
 static u32 prof_multiblock_total_blocks = 0; // total blocks in super-block modules
 static u32 prof_fb_by_op[128] = {};        // runtime fallback calls by op type
+static bool prof_native_opset[128] = {};   // which SHIL ops compiled natively (cumulative)
+static bool prof_fallback_opset[128] = {}; // which SHIL ops compiled as fallback (cumulative)
 static double prof_emulation_ms = 0;       // time in inner block dispatch loop
 static double prof_system_ms = 0;          // time in UpdateSystem_INTC
 
@@ -1439,7 +1441,6 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 	typedef void (*block_fn_t)(u32, u32);
 	Sh4Context& ctx = Sh4cntx;
 	int blocks_run = 0;
-	static int debug_count = 0;
 
 	while (ctx.cycle_counter > 0) {
 		u32 pc = ctx.pc;
@@ -1452,17 +1453,18 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 			return blocks_run;
 		}
 
-		int cc_before = ctx.cycle_counter;
 		// Cast table index to function pointer — Emscripten compiles
 		// this to call_indirect, staying entirely within WASM.
 		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
 		fn(ctx_ptr, ram_base);
-		int cc_after = ctx.cycle_counter;
 		blocks_run++;
 
-		// Count idle loops (block set cc to 0 = consumed entire remaining timeslice)
-		if (cc_after == 0) g_idle_zeroed++;
-		debug_count++;
+		if (ctx.cycle_counter == 0) g_idle_zeroed++;
+
+		if (ctx.interrupt_pend) {
+			g_dispatch_result = 3;  // interrupt
+			return blocks_run;
+		}
 	}
 
 	g_dispatch_result = 0;  // timeslice complete
@@ -1550,9 +1552,8 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp i32 + N cached register i32s + 1 cc_save i32
-	u32 LOCAL_CC_SAVE = cache.nextLocal;  // first free local after cache entries
-	u32 totalExtraLocals = 2 + cache.localCount();  // tmp + cached + cc_save
+	// Locals: 1 temp i32 + N cached register i32s
+	u32 totalExtraLocals = 1 + cache.localCount();
 	u32 lc = totalExtraLocals;
 	u8 lt = WASM_TYPE_I32;
 	b.emitLocals(1, &lc, &lt);
@@ -1564,24 +1565,20 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 		b.op_local_set(entry.wasmLocal);
 	}
 
-	// Prologue: cycle_counter -= guest_cycles, save expected value
-	// SHIL fallback ops (shil_fb, ifb) can corrupt cycle_counter as a side effect
-	// (e.g., fastmmu TLB miss charges 164 cycles, ReadMem/WriteMem MMIO handlers).
-	// Save the correct post-subtraction value and restore it at block exit,
-	// matching the forced reset in the SHIL executor path (EXECUTOR_MODE != 6).
-	b.op_local_get(LOCAL_CTX);  // [ctx]  (for i32.store later)
+	// Prologue: cycle_counter -= guest_cycles
 	b.op_local_get(LOCAL_CTX);
-	b.op_i32_load(ctx_off::CYCLE_COUNTER);  // [ctx, cc]
+	b.op_local_get(LOCAL_CTX);
+	b.op_i32_load(ctx_off::CYCLE_COUNTER);
 	b.op_i32_const((s32)block->guest_cycles);
-	b.op_i32_sub();             // [ctx, cc-guest_cycles]
-	b.op_local_tee(LOCAL_CC_SAVE);  // save expected cc value, keep on stack
-	b.op_i32_store(ctx_off::CYCLE_COUNTER);  // store to ctx[0x174]
+	b.op_i32_sub();
+	b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 	// Emit each SHIL op with register cache
 	for (u32 i = 0; i < block->oplist.size(); i++) {
 		shil_opcode& op = block->oplist[i];
 		if (!emitShilOp(b, op, block, i, cache)) {
 			prof_fallback_ops_compiled++;
+			if (op.op < 128) prof_fallback_opset[op.op] = true;
 			// Unhandled op — flush, call fallback, reload
 			emitFlushAll(b, cache);
 			b.op_i32_const((s32)block->vaddr);
@@ -1590,6 +1587,7 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 			emitReloadAll(b, cache);
 		} else {
 			prof_native_ops_compiled++;
+			if (op.op < 128) prof_native_opset[op.op] = true;
 		}
 	}
 
@@ -1598,11 +1596,6 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
-
-	// Restore cycle_counter from saved value (undo any corruption by fallback ops)
-	b.op_local_get(LOCAL_CTX);
-	b.op_local_get(LOCAL_CC_SAVE);
-	b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 	// Idle loop fast-forward: set cycle_counter = 0 when looping back to self
 	if (is_idle_loop) {
@@ -1711,9 +1704,8 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 		pcToIdx[chain[i]->vaddr] = i;
 	}
 
-	// Extra locals for dispatch index and cc_save
+	// Extra local for dispatch index
 	u32 LOCAL_NEXT_IDX = 3 + cache.localCount();
-	u32 LOCAL_CC_SAVE = LOCAL_NEXT_IDX + 1;
 
 	b.emitHeader();
 
@@ -1750,8 +1742,8 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp + N cached regs + 1 dispatch index + 1 cc_save
-	u32 totalExtraLocals = 1 + cache.localCount() + 2;
+	// Locals: 1 temp + N cached regs + 1 dispatch index
+	u32 totalExtraLocals = 1 + cache.localCount() + 1;
 	u32 lc = totalExtraLocals;
 	u8 lt = WASM_TYPE_I32;
 	b.emitLocals(1, &lc, &lt);
@@ -1796,13 +1788,12 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 		for (auto& [offset, entry] : cache.entries)
 			entry.dirty = true;
 
-		// Decrement cycle_counter (save expected value for restore after SHIL ops)
-		b.op_local_get(LOCAL_CTX);  // [ctx]
+		// Decrement cycle_counter
 		b.op_local_get(LOCAL_CTX);
-		b.op_i32_load(ctx_off::CYCLE_COUNTER);  // [ctx, cc]
+		b.op_local_get(LOCAL_CTX);
+		b.op_i32_load(ctx_off::CYCLE_COUNTER);
 		b.op_i32_const((s32)blk->guest_cycles);
-		b.op_i32_sub();             // [ctx, cc-gc]
-		b.op_local_tee(LOCAL_CC_SAVE);
+		b.op_i32_sub();
 		b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 		// Emit SHIL ops (shared cache, ifb/shil_fb uses flush+reload)
@@ -1810,6 +1801,7 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 			shil_opcode& op = blk->oplist[j];
 			if (!emitShilOp(b, op, blk, j, cache)) {
 				prof_fallback_ops_compiled++;
+				if (op.op < 128) prof_fallback_opset[op.op] = true;
 				emitFlushAll(b, cache);
 				b.op_i32_const((s32)blk->vaddr);
 				b.op_i32_const((s32)j);
@@ -1817,16 +1809,12 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 				emitReloadAll(b, cache);
 			} else {
 				prof_native_ops_compiled++;
+				if (op.op < 128) prof_native_opset[op.op] = true;
 			}
 		}
 
 		// Block exit: writes next PC to ctx memory
 		emitBlockExit(b, blk, cache);
-
-		// Restore cycle_counter from saved value (undo SHIL fallback corruption)
-		b.op_local_get(LOCAL_CTX);
-		b.op_local_get(LOCAL_CC_SAVE);
-		b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 		// Route to next block or exit
 		u32 bcls_blk = BET_GET_CLS(blk->BlockType);
@@ -2059,6 +2047,9 @@ public:
 								interpExecs++;
 							}
 							// Block now compiled — dispatch loop will find it next iteration
+						} else if (g_dispatch_result == 3) {
+							// Interrupt pending
+							UpdateINTC();
 						}
 					}
 
@@ -2187,6 +2178,27 @@ public:
 					top[j].op, top[j].count);
 			}
 
+			// Dump cumulative SHIL opcode inventory (for cross-game diffing)
+			EM_ASM({ console.log('--- SHIL Opcode Inventory (cumulative) ---'); });
+			{
+				// Native WASM opcodes
+				EM_ASM({ console.log('NATIVE_OPS:'); });
+				for (int i = 0; i < 128; i++) {
+					if (prof_native_opset[i]) {
+						EM_ASM({ console.log('  ' + UTF8ToString($0)); },
+							shil_opcode_name(i));
+					}
+				}
+				// Fallback (interpreter) opcodes
+				EM_ASM({ console.log('FALLBACK_OPS:'); });
+				for (int i = 0; i < 128; i++) {
+					if (prof_fallback_opset[i]) {
+						EM_ASM({ console.log('  ' + UTF8ToString($0)); },
+							shil_opcode_name(i));
+					}
+				}
+			}
+
 			// Reset profiling for next mainloop
 			prof_emulation_ms = 0;
 			prof_system_ms = 0;
@@ -2206,6 +2218,8 @@ public:
 	{
 		wasm_clear_cache();
 		memset(jit_dispatch_table, 0, sizeof(jit_dispatch_table));
+		memset(prof_native_opset, 0, sizeof(prof_native_opset));
+		memset(prof_fallback_opset, 0, sizeof(prof_fallback_opset));
 		blockByVaddr.clear();
 		blockCodeHash.clear();
 		compiledCount = 0;
