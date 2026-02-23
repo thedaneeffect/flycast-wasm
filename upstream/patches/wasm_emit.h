@@ -253,9 +253,6 @@ static inline void emitReloadAll(WasmModuleBuilder& b, RegCache& cache) {
 // ============================================================
 static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
                         RuntimeBlockInfo* block, u32 opIndex, RegCache& cache) {
-	// DIAGNOSTIC: force all ops through interpreter fallback (shil_fb)
-	// to isolate whether rendering bugs are in WASM emitters or infrastructure
-	return false;
 	switch (op.op) {
 
 	// ---- Tier 1: Integer ALU ----
@@ -517,10 +514,11 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		return true;
 
 	case shop_jcond:
-		// Store condition to sr.T (cached or memory)
-		emitPreStoreOffset(b, ctx_off::SR_T, cache);
+		// Save sr.T into jdyn for delayed conditional branches (BT/S, BF/S).
+		// Condition evaluated BEFORE delay slot, branch AFTER.
+		emitPreStoreOffset(b, ctx_off::JDYN, cache);
 		emitLoadParamCached(b, op.rs1, cache);
-		emitPostStoreOffset(b, ctx_off::SR_T, cache);
+		emitPostStoreOffset(b, ctx_off::JDYN, cache);
 		return true;
 
 	// ---- Memory operations ----
