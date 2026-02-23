@@ -2003,14 +2003,17 @@ public:
 					u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
+					u32 exit_ts_complete = 0, exit_miss = 0, exit_miss_then_compiled = 0;
 					while (sh4ctx->cycle_counter > 0) {
 						int nblocks = c_dispatch_loop(ctx_ptr, ram_ptr);
 						blockExecs += nblocks;
 						g_wasm_block_count += nblocks;
 
 						if (g_dispatch_result == 0) {
+							exit_ts_complete++;
 							break;  // timeslice complete
 						} else if (g_dispatch_result == 1) {
+							exit_miss++;
 							// Cache miss — compile the block
 							u32 miss_pc = g_dispatch_miss_pc;
 							auto it = blockByVaddr.find(miss_pc);
@@ -2029,6 +2032,12 @@ public:
 							}
 							// Block now compiled — dispatch loop will find it next iteration
 						}
+					}
+
+					// Debug: log dispatch loop exit reasons (first 3 mainloops)
+					if (mainloop_count <= 3 && timeslices < 5) {
+						EM_ASM({ console.log('[dispatch-debug] ts#' + $0 + ': cc_before=' + $1 + ' blocks=' + $2 + ' exit_ts=' + $3 + ' exit_miss=' + $4); },
+							timeslices, sh4ctx->cycle_counter, blockExecs, exit_ts_complete, exit_miss);
 					}
 
 					double emu_t1 = emscripten_get_now();
