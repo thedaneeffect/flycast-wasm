@@ -901,9 +901,9 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		return true;
 	}
 
-#if 0  // BISECT: shld/shad disabled
 	case shop_shld: {
 		// Variable shift left/right (unsigned) depending on sign of rs2
+		// FIX: i32.sub operand order — push 0 first, then shift, so sub = 0-shift = -shift
 		emitPreStore(b, op.rd, cache);
 		emitLoadParamCached(b, op.rs2, cache);  // shift amount
 		b.op_i32_const(0);
@@ -917,9 +917,9 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			b.op_i32_shl();
 		b.op_else();
 			// shift < 0: check if (-shift & 0x1F) == 0
-			emitLoadParamCached(b, op.rs2, cache);
 			b.op_i32_const(0);
-			b.op_i32_sub();  // negate
+			emitLoadParamCached(b, op.rs2, cache);
+			b.op_i32_sub();  // 0 - shift = -shift
 			b.op_i32_const(0x1F);
 			b.op_i32_and();
 			b.op_i32_eqz();
@@ -927,9 +927,9 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 				b.op_i32_const(0);  // result is 0
 			b.op_else();
 				emitLoadParamCached(b, op.rs1, cache);
-				emitLoadParamCached(b, op.rs2, cache);
 				b.op_i32_const(0);
-				b.op_i32_sub();  // negate
+				emitLoadParamCached(b, op.rs2, cache);
+				b.op_i32_sub();  // 0 - shift = -shift
 				b.op_i32_const(0x1F);
 				b.op_i32_and();
 				b.op_i32_shr_u();
@@ -941,6 +941,7 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 
 	case shop_shad: {
 		// Variable arithmetic shift depending on sign of rs2
+		// FIX: i32.sub operand order — push 0 first, then shift, so sub = 0-shift = -shift
 		emitPreStore(b, op.rd, cache);
 		emitLoadParamCached(b, op.rs2, cache);
 		b.op_i32_const(0);
@@ -953,9 +954,9 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 			b.op_i32_and();
 			b.op_i32_shl();
 		b.op_else();
-			emitLoadParamCached(b, op.rs2, cache);
 			b.op_i32_const(0);
-			b.op_i32_sub();
+			emitLoadParamCached(b, op.rs2, cache);
+			b.op_i32_sub();  // 0 - shift = -shift
 			b.op_i32_const(0x1F);
 			b.op_i32_and();
 			b.op_i32_eqz();
@@ -966,9 +967,9 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 				b.op_i32_shr_s();
 			b.op_else();
 				emitLoadParamCached(b, op.rs1, cache);
-				emitLoadParamCached(b, op.rs2, cache);
 				b.op_i32_const(0);
-				b.op_i32_sub();
+				emitLoadParamCached(b, op.rs2, cache);
+				b.op_i32_sub();  // 0 - shift = -shift
 				b.op_i32_const(0x1F);
 				b.op_i32_and();
 				b.op_i32_shr_s();  // arithmetic shift
@@ -977,7 +978,6 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 		emitPostStore(b, op.rd, cache);
 		return true;
 	}
-#endif  // BISECT shld/shad
 
 	case shop_mov64:
 		// Copy 64 bits (float register pairs, not cached)
