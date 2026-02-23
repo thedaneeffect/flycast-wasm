@@ -1976,9 +1976,9 @@ public:
 #ifdef __EMSCRIPTEN__
 		if (compiledCount <= 10 || (compiledCount % 200 == 0)) {
 			EM_ASM({ console.log('[rec_wasm] compiled=' + $0 + ' fail=' + $1 +
-				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3); },
+				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3 + ' cycles=' + $4); },
 				compiledCount, failCount, block->vaddr,
-				(int)block->oplist.size());
+				(int)block->oplist.size(), block->guest_cycles);
 		}
 #endif
 	}
