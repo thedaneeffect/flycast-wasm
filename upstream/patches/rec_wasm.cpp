@@ -64,10 +64,6 @@ double wasm_prof_compile_ms();
 double wasm_prof_exec_sample_ms();
 int wasm_prof_exec_samples();
 int wasm_prof_exec_count();
-int wasm_run_slice(u32 ctx_ptr, u32 ram_base);
-int wasm_slice_result();
-int wasm_slice_miss_pc();
-int wasm_slice_trap_pc();
 }
 #endif
 
@@ -118,6 +114,21 @@ static u32 prof_multiblock_total_blocks = 0; // total blocks in super-block modu
 static u32 prof_fb_by_op[128] = {};        // runtime fallback calls by op type
 static double prof_emulation_ms = 0;       // time in inner block dispatch loop
 static double prof_system_ms = 0;          // time in UpdateSystem_INTC
+
+// ============================================================
+// C dispatch table: PC hash → indirect function table index
+// ============================================================
+// Each compiled WASM block is registered in Emscripten's
+// __indirect_function_table. The dispatch table maps PC hashes
+// to table indices. c_dispatch_loop uses call_indirect to call
+// blocks entirely within WASM — no JS in the hot path.
+#define JIT_TABLE_SIZE (1 << 20)  // 1M entries (~4MB)
+#define JIT_TABLE_MASK (JIT_TABLE_SIZE - 1)
+static u32 jit_dispatch_table[JIT_TABLE_SIZE];  // PC hash → table index (0 = miss)
+
+// Dispatch loop exit status
+static int g_dispatch_result = 0;    // 0=timeslice, 1=miss, 3=interrupt
+static u32 g_dispatch_miss_pc = 0;
 
 // ============================================================
 // Memory access cycle penalties — approximates Sh4Cycles
@@ -1317,23 +1328,41 @@ EM_JS(int, wasm_compile_block, (const u8* bytesPtr, u32 len, u32 block_pc), {
 	try {
 		var wasmBytes = Module.HEAPU8.slice(bytesPtr, bytesPtr + len);
 		var mod = new WebAssembly.Module(wasmBytes);
+		// Use Emscripten's C export wrappers directly (no extra arrow-function layer).
+		// Raw WASM exports have mangled names due to -O3 -flto, so we use Module._fn.
+		// The main perf win is the C dispatch loop (call_indirect), not the import path.
 		var instance = new WebAssembly.Instance(mod, {
 			env: {
 				memory: wasmMemory,
-				read8:   function(addr) { return Module._wasm_mem_read8(addr); },
-				read16:  function(addr) { return Module._wasm_mem_read16(addr); },
-				read32:  function(addr) { return Module._wasm_mem_read32(addr); },
-				write8:  function(addr, val) { Module._wasm_mem_write8(addr, val); },
-				write16: function(addr, val) { Module._wasm_mem_write16(addr, val); },
-				write32: function(addr, val) { Module._wasm_mem_write32(addr, val); },
-				ifb:     function(opcode, pc) { Module._wasm_exec_ifb(opcode, pc); },
-				shil_fb: function(block_vaddr, op_idx) { Module._wasm_exec_shil_fb(block_vaddr, op_idx); }
+				read8:   Module._wasm_mem_read8,
+				read16:  Module._wasm_mem_read16,
+				read32:  Module._wasm_mem_read32,
+				write8:  Module._wasm_mem_write8,
+				write16: Module._wasm_mem_write16,
+				write32: Module._wasm_mem_write32,
+				ifb:     Module._wasm_exec_ifb,
+				shil_fb: Module._wasm_exec_shil_fb
 			}
 		});
+
+		// Register in shared indirect function table for call_indirect dispatch
+		var table = wasmTable;
+		if (!Module._jitTableBase) {
+			Module._jitTableBase = table.length;
+			Module._jitNextIdx = table.length;
+			table.grow(4096);  // pre-allocate in bulk (not one-by-one)
+		}
+		var idx = Module._jitNextIdx++;
+		if (idx >= table.length) {
+			table.grow(4096);
+		}
+		table.set(idx, instance.exports.b);
+
+		// Keep JS cache for debug/fallback (wasm_execute_block)
 		if (!Module._wasmBlockCache) Module._wasmBlockCache = {};
 		Module._wasmBlockCache[block_pc] = instance.exports.b;
 		Module._prof.compileMs += performance.now() - t0;
-		return 1;
+		return idx;  // table index (>0 on success, 0 reserved for NULL)
 	} catch (e) {
 		console.error('[rec_wasm] compile fail PC=0x' + (block_pc >>> 0).toString(16) + ': ' + e.message);
 		return 0;
@@ -1369,6 +1398,9 @@ EM_JS(int, wasm_has_block, (u32 block_pc), {
 
 EM_JS(void, wasm_clear_cache, (), {
 	Module._wasmBlockCache = {};
+	// Reset table allocation — old entries become unreachable
+	Module._jitTableBase = 0;
+	Module._jitNextIdx = 0;
 });
 
 EM_JS(void, wasm_remove_block, (u32 block_pc), {
@@ -1393,78 +1425,43 @@ EM_JS(int, wasm_prof_exec_count, (), {
 	return Module._prof ? Module._prof.execCount : 0;
 });
 
-// JS dispatch loop: runs compiled WASM blocks in a tight JS loop,
-// eliminating C++<->JS boundary crossing per block (~385K/mainloop -> one per timeslice).
-// Returns number of blocks executed. Module._sliceResult indicates exit reason:
+// C dispatch loop: runs compiled WASM blocks via call_indirect.
+// Blocks stay entirely within WASM — no JS in the hot path.
+// Returns number of blocks executed. g_dispatch_result indicates exit reason:
 //   0 = timeslice complete (cycle_counter <= 0)
-//   1 = cache miss (Module._sliceMissPC = PC needing compilation)
-//   2 = WASM trap (Module._sliceTrapPC = PC that trapped)
+//   1 = cache miss (g_dispatch_miss_pc = PC needing compilation)
 //   3 = interrupt pending (needs C++ UpdateINTC)
-EM_JS(int, wasm_run_slice, (u32 ctx_ptr, u32 ram_base), {
-	var cache = Module._wasmBlockCache;
-	if (!cache) { Module._sliceResult = 0; return 0; }
+static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
+	typedef void (*block_fn_t)(u32, u32);
+	Sh4Context& ctx = Sh4cntx;
+	int blocks_run = 0;
 
-	var pcIdx = (ctx_ptr + 0x148) >>> 2;
-	var ccIdx = (ctx_ptr + 0x174) >>> 2;
-	var intIdx = (ctx_ptr + 0x16C) >>> 2;
+	while (ctx.cycle_counter > 0) {
+		u32 pc = ctx.pc;
+		u32 key = (pc >> 1) & JIT_TABLE_MASK;
+		u32 table_idx = jit_dispatch_table[key];
 
-	if (!Module._prof) Module._prof = { compileMs: 0, execMs: 0, execSamples: 0, execCount: 0 };
-	Module._sliceResult = 0;
-	var blocksRun = 0;
-
-	while (true) {
-		var mem = Module.HEAPU32;
-		if ((mem[ccIdx] | 0) <= 0) break;
-
-		var pc = mem[pcIdx] | 0;  // signed i32 to match EM_JS cache keys
-		var fn = cache[pc];
-
-		if (!fn) {
-			Module._sliceResult = 1;
-			Module._sliceMissPC = pc;
-			return blocksRun;
+		if (table_idx == 0) {
+			g_dispatch_result = 1;  // miss
+			g_dispatch_miss_pc = pc;
+			return blocks_run;
 		}
 
-		try {
-			Module._prof.execCount++;
-			if ((Module._prof.execCount & 0x3FF) === 0) {
-				var t0 = performance.now();
-				fn(ctx_ptr, ram_base);
-				Module._prof.execMs += performance.now() - t0;
-				Module._prof.execSamples++;
-			} else {
-				fn(ctx_ptr, ram_base);
-			}
-		} catch (e) {
-			Module._sliceResult = 2;
-			Module._sliceTrapPC = pc;
-			return blocksRun;
-		}
+		// Cast table index to function pointer — Emscripten compiles
+		// this to call_indirect, staying entirely within WASM.
+		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
+		fn(ctx_ptr, ram_base);
+		blocks_run++;
 
-		blocksRun++;
-
-		mem = Module.HEAPU32;
-		if (mem[intIdx]) {
-			Module._sliceResult = 3;
-			return blocksRun;
+		if (ctx.interrupt_pend) {
+			g_dispatch_result = 3;  // interrupt
+			return blocks_run;
 		}
 	}
 
-	Module._sliceResult = 0;
-	return blocksRun;
-});
-
-EM_JS(int, wasm_slice_result, (), {
-	return Module._sliceResult || 0;
-});
-
-EM_JS(int, wasm_slice_miss_pc, (), {
-	return Module._sliceMissPC || 0;
-});
-
-EM_JS(int, wasm_slice_trap_pc, (), {
-	return Module._sliceTrapPC || 0;
-});
+	g_dispatch_result = 0;  // timeslice complete
+	return blocks_run;
+}
 
 #else
 static int wasm_compile_block(const u8*, u32, u32) { return 0; }
@@ -1477,10 +1474,8 @@ static double wasm_prof_compile_ms() { return 0; }
 static double wasm_prof_exec_sample_ms() { return 0; }
 static int wasm_prof_exec_samples() { return 0; }
 static int wasm_prof_exec_count() { return 0; }
-static int wasm_run_slice(u32, u32) { return 0; }
-static int wasm_slice_result() { return 0; }
-static int wasm_slice_miss_pc() { return 0; }
-static int wasm_slice_trap_pc() { return 0; }
+
+static int c_dispatch_loop(u32, u32) { return 0; }
 #endif
 
 // ============================================================
@@ -1955,12 +1950,15 @@ public:
 		}
 
 		const auto& bytes = builder.getBytes();
-		int result = wasm_compile_block(bytes.data(), (u32)bytes.size(), block->vaddr);
+		int table_idx = wasm_compile_block(bytes.data(), (u32)bytes.size(), block->vaddr);
 
-		if (result)
+		if (table_idx > 0) {
+			// Store in dispatch table — (pc>>1)&MASK handles address aliasing
+			jit_dispatch_table[(block->vaddr >> 1) & JIT_TABLE_MASK] = (u32)table_idx;
 			compiledCount++;
-		else
+		} else {
 			failCount++;
+		}
 #else
 		compiledCount++;
 #endif
@@ -2001,9 +1999,6 @@ public:
 		double ml_start = emscripten_get_now();
 		u32 fb_count_start = g_shil_fb_call_count;
 		double compile_ms_start = wasm_prof_compile_ms();
-		double exec_sample_ms_start = wasm_prof_exec_sample_ms();
-		int exec_samples_start = wasm_prof_exec_samples();
-		int exec_count_start = wasm_prof_exec_count();
 
 		try {
 			do {
@@ -2013,17 +2008,15 @@ public:
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
 					while (sh4ctx->cycle_counter > 0) {
-						int nblocks = wasm_run_slice(ctx_ptr, ram_ptr);
+						int nblocks = c_dispatch_loop(ctx_ptr, ram_ptr);
 						blockExecs += nblocks;
 						g_wasm_block_count += nblocks;
 
-						int result = wasm_slice_result();
-
-						if (result == 0) {
+						if (g_dispatch_result == 0) {
 							break;  // timeslice complete
-						} else if (result == 1) {
-							// Cache miss - compile the block
-							u32 miss_pc = (u32)wasm_slice_miss_pc();
+						} else if (g_dispatch_result == 1) {
+							// Cache miss — compile the block
+							u32 miss_pc = g_dispatch_miss_pc;
 							auto it = blockByVaddr.find(miss_pc);
 							if (it == blockByVaddr.end()) {
 								rdv_FailedToFindBlock(miss_pc);
@@ -2038,25 +2031,8 @@ public:
 								sh4ctx->cycle_counter -= 1;
 								interpExecs++;
 							}
-						} else if (result == 2) {
-							// WASM trap - C++ fallback for this block
-							u32 trap_pc = (u32)wasm_slice_trap_pc();
-							auto it = blockByVaddr.find(trap_pc);
-							if (it != blockByVaddr.end()) {
-								RuntimeBlockInfo* block = it->second;
-								g_ifb_exception_pending = false;
-								sh4ctx->cycle_counter -= block->guest_cycles;
-								for (u32 i = 0; i < block->oplist.size(); i++)
-									wasm_exec_shil_fb(block->vaddr, i);
-								applyBlockExitCpp(block);
-								g_wasm_block_count++;
-								blockExecs++;
-								if (g_ifb_exception_pending) {
-									Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
-									g_ifb_exception_pending = false;
-								}
-							}
-						} else if (result == 3) {
+							// Block now compiled — dispatch loop will find it next iteration
+						} else if (g_dispatch_result == 3) {
 							// Interrupt pending
 							UpdateINTC();
 						}
@@ -2092,14 +2068,7 @@ public:
 		{
 			double ml_elapsed = emscripten_get_now() - ml_start;
 			double compile_ms = wasm_prof_compile_ms() - compile_ms_start;
-			double exec_sample_ms = wasm_prof_exec_sample_ms() - exec_sample_ms_start;
-			int exec_samples = wasm_prof_exec_samples() - exec_samples_start;
-			int exec_count = wasm_prof_exec_count() - exec_count_start;
 			u32 fb_calls = g_shil_fb_call_count - fb_count_start;
-
-			// Estimated total execution time from samples
-			double avg_exec_us = exec_samples > 0 ? (exec_sample_ms * 1000.0 / exec_samples) : 0;
-			double est_exec_ms = avg_exec_us * exec_count / 1000.0;
 
 			// Other time = total - emulation - system
 			double other_ms = ml_elapsed - prof_emulation_ms - prof_system_ms;
@@ -2115,30 +2084,25 @@ public:
 				var fbCalls = $7;
 				var nativeOps = $8;
 				var fbOps = $9;
-				var execCount = $10;
-				var avgExecUs = $11;
-				var estExecMs = $12;
-				var execSamples = $13;
 
 				var pct = function(v) { return total > 0 ? (v / total * 100).toFixed(1) : '?'; };
 				console.log('');
-				console.log('=== PROFILING REPORT (mainloop #' + $14 + ') ===');
+				console.log('=== PROFILING REPORT (mainloop #' + $10 + ') ===');
+				console.log('Dispatch: call_indirect (C dispatch loop, no JS)');
 				console.log('Total wall time:  ' + total.toFixed(0) + ' ms');
 				console.log('');
 				console.log('--- Time Breakdown ---');
-				console.log('Emulation (dispatch+exec+fb): ' + emu.toFixed(0) + ' ms (' + pct(emu) + '%)');
-				console.log('  Est. WASM execution:        ' + estExecMs.toFixed(0) + ' ms (avg ' + avgExecUs.toFixed(2) + ' us/block, ' + execSamples + ' samples)');
-				console.log('  Est. dispatch+fb overhead:  ' + (emu - estExecMs).toFixed(0) + ' ms');
+				console.log('Emulation (C dispatch+exec):  ' + emu.toFixed(0) + ' ms (' + pct(emu) + '%)');
 				console.log('System (render/INTC):         ' + sys.toFixed(0) + ' ms (' + pct(sys) + '%)');
 				console.log('Compilation:                  ' + compile.toFixed(1) + ' ms (' + pct(compile) + '%)');
-				console.log('Other (JS overhead):          ' + other.toFixed(0) + ' ms (' + pct(other) + '%)');
+				console.log('Other (overhead):             ' + other.toFixed(0) + ' ms (' + pct(other) + '%)');
 				console.log('');
 				console.log('--- Block Stats ---');
 				console.log('Blocks executed:  ' + blks.toLocaleString());
 				console.log('Timeslices:       ' + ts.toLocaleString());
 				console.log('Blocks/timeslice: ' + (blks / ts).toFixed(1));
 				console.log('Blocks/ms:        ' + (blks / total).toFixed(1));
-				console.log('Idle loops:       ' + $15);
+				console.log('Idle loops:       ' + $11);
 				console.log('');
 				console.log('--- Op Coverage (compile-time) ---');
 				console.log('Native WASM ops:  ' + nativeOps.toLocaleString());
@@ -2161,12 +2125,8 @@ public:
 				fb_calls,            // $7 fbCalls
 				prof_native_ops_compiled,   // $8 nativeOps
 				prof_fallback_ops_compiled, // $9 fbOps
-				exec_count,          // $10 execCount
-				avg_exec_us,         // $11 avgExecUs
-				est_exec_ms,         // $12 estExecMs
-				exec_samples,        // $13 execSamples
-				mainloop_count,      // $14 mainloop#
-				prof_idle_loops_detected  // $15 idle loops
+				mainloop_count,      // $10 mainloop#
+				prof_idle_loops_detected  // $11 idle loops
 			);
 
 			// Multi-block stats (separate EM_ASM to avoid 16-arg limit)
@@ -2212,12 +2172,13 @@ public:
 	void reset() override
 	{
 		wasm_clear_cache();
+		memset(jit_dispatch_table, 0, sizeof(jit_dispatch_table));
 		blockByVaddr.clear();
 		blockCodeHash.clear();
 		compiledCount = 0;
 		failCount = 0;
 #ifdef __EMSCRIPTEN__
-		EM_ASM({ console.log('[rec_wasm] reset: cleared WASM block cache'); });
+		EM_ASM({ console.log('[rec_wasm] reset: cleared WASM block cache + dispatch table'); });
 #endif
 	}
 

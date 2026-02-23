@@ -45,6 +45,7 @@ emcc -O3 -flto \
   -s EXPORTED_RUNTIME_METHODS='["callMain","ccall","cwrap","UTF8ToString","stringToUTF8","lengthBytesUTF8","setValue","getValue","writeArrayToMemory","addRunDependency","removeRunDependency","FS","abort","AL","wasmExports"]' \
   -s INITIAL_MEMORY=268435456 \
   -s ALLOW_MEMORY_GROWTH=1 \
+  -s ALLOW_TABLE_GROWTH \
   -s ASYNCIFY=1 \
   -s ASYNCIFY_STACK_SIZE=65536 \
   -s 'ASYNCIFY_REMOVE=["Sh4Interpreter::*","i0*","i1*","addrspace::*","mmu_*","aica::*","Pvr*","pvr*","*ReadMem*","*WriteMem*","sh4_sched_tick*","*TA_*Param*"]' \
