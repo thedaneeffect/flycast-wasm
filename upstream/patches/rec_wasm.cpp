@@ -1436,6 +1436,7 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 	typedef void (*block_fn_t)(u32, u32);
 	Sh4Context& ctx = Sh4cntx;
 	int blocks_run = 0;
+	static int debug_count = 0;
 
 	while (ctx.cycle_counter > 0) {
 		u32 pc = ctx.pc;
@@ -1448,11 +1449,19 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 			return blocks_run;
 		}
 
+		int cc_before = ctx.cycle_counter;
 		// Cast table index to function pointer — Emscripten compiles
 		// this to call_indirect, staying entirely within WASM.
 		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
 		fn(ctx_ptr, ram_base);
+		int cc_after = ctx.cycle_counter;
 		blocks_run++;
+
+		if (debug_count < 20) {
+			debug_count++;
+			EM_ASM({ console.log('[cc-trace] pc=0x' + ($0>>>0).toString(16) + ' cc:' + $1 + '->' + $2 + ' delta=' + ($1-$2)); },
+				pc, cc_before, cc_after);
+		}
 	}
 
 	g_dispatch_result = 0;  // timeslice complete
