@@ -74,8 +74,6 @@ int wasm_prof_exec_count();
 // Block info storage for SHIL fallback
 // ============================================================
 static std::unordered_map<u32, RuntimeBlockInfo*> blockByVaddr;
-// SMC (self-modifying code) detection: store first word of block code
-static std::unordered_map<u32, u32> blockCodeHash;
 static std::unordered_map<u32, u32> blockExecCount;   // PC → execution count (per mainloop)
 
 // ============================================================
@@ -130,6 +128,7 @@ static double prof_system_ms = 0;          // time in UpdateSystem_INTC
 #define JIT_TABLE_MASK (JIT_TABLE_SIZE - 1)
 static u32 jit_dispatch_table[JIT_TABLE_SIZE];  // PC hash → table index (0 = miss)
 static u32 jit_dispatch_pc[JIT_TABLE_SIZE];    // PC hash → actual PC (collision guard)
+static u32 jit_dispatch_hash[JIT_TABLE_SIZE];  // PC hash → first opcode (SMC detection)
 
 // Dispatch loop exit status
 static int g_dispatch_result = 0;    // 0=timeslice, 1=miss, 3=interrupt
@@ -1462,6 +1461,30 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 			return blocks_run;
 		}
 
+		// SMC check: compare first opcode against compile-time hash.
+		// On WASM there's no virtual memory protection, so this is the
+		// only way to detect self-modifying code. Flat array — no map
+		// lookup, just three array reads + one memory read per dispatch.
+		if ((u32)IReadMem16(pc) != jit_dispatch_hash[key]) {
+			static u32 smc_log_count = 0;
+			if (smc_log_count < 50) {
+				smc_log_count++;
+				EM_ASM({ console.log('[JIT-SMC] pc=0x' + ($0>>>0).toString(16) +
+					' old_op=0x' + $1.toString(16) + ' new_op=0x' + $2.toString(16)); },
+					pc, jit_dispatch_hash[key], (u32)IReadMem16(pc));
+			}
+			jit_dispatch_table[key] = 0;
+			jit_dispatch_pc[key] = 0;
+			jit_dispatch_hash[key] = 0;
+			auto blk_it = blockByVaddr.find(pc);
+			if (blk_it != blockByVaddr.end())
+				blockByVaddr.erase(blk_it);
+			wasm_remove_block(pc);
+			g_dispatch_result = 1;  // miss — recompile
+			g_dispatch_miss_pc = pc;
+			return blocks_run;
+		}
+
 		// Cast table index to function pointer — Emscripten compiles
 		// this to call_indirect, staying entirely within WASM.
 		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
@@ -1948,21 +1971,17 @@ public:
 		blockByVaddr[block->vaddr] = block;
 
 		// Store hash for SMC detection (first 2 bytes of block code)
-		blockCodeHash[block->vaddr] = (u32)IReadMem16(block->vaddr);
+		// SMC fingerprint — stored in flat array alongside dispatch table
+		jit_dispatch_hash[(block->vaddr >> 1) & JIT_TABLE_MASK] = (u32)IReadMem16(block->vaddr);
 
 #if EXECUTOR_MODE == 6
 		// Only build WASM modules when using WASM execution
 		WasmModuleBuilder builder;
 
-		// Try multi-block: chain statically-connected blocks
-		auto chain = discoverChain(block);
-		if (chain.size() >= 2) {
-			buildMultiBlockModule(builder, chain);
-			prof_multiblock_modules++;
-			prof_multiblock_total_blocks += (u32)chain.size();
-		} else {
-			buildBlockModule(builder, block);
-		}
+		// Multi-block chaining disabled: interior blocks bypass dispatch-time
+		// SMC check, creating a correctness gap. Re-enable once per-block
+		// SMC guards are emitted inside multi-block modules.
+		buildBlockModule(builder, block);
 
 		const auto& bytes = builder.getBytes();
 		int table_idx = wasm_compile_block(bytes.data(), (u32)bytes.size(), block->vaddr);
@@ -2140,7 +2159,7 @@ public:
 					if (it != blockByVaddr.end()) {
 						blockByVaddr.erase(it);
 					}
-					blockCodeHash.erase(trap_pc);
+					jit_dispatch_hash[trap_key] = 0;
 					// Interpret one instruction to advance past the trap
 					sh4ctx->pc = trap_pc + 2;
 					u16 rawOp = IReadMem16(trap_pc);
@@ -2263,8 +2282,8 @@ public:
 		wasm_clear_cache();
 		memset(jit_dispatch_table, 0, sizeof(jit_dispatch_table));
 		memset(jit_dispatch_pc, 0, sizeof(jit_dispatch_pc));
+		memset(jit_dispatch_hash, 0, sizeof(jit_dispatch_hash));
 		blockByVaddr.clear();
-		blockCodeHash.clear();
 		blockExecCount.clear();
 		compiledCount = 0;
 		failCount = 0;
