@@ -129,6 +129,7 @@ static u32 jit_dispatch_table[JIT_TABLE_SIZE];  // PC hash → table index (0 = 
 // Dispatch loop exit status
 static int g_dispatch_result = 0;    // 0=timeslice, 1=miss, 3=interrupt
 static u32 g_dispatch_miss_pc = 0;
+static u32 g_idle_zeroed = 0;  // blocks that set cycle_counter to exactly 0
 
 // ============================================================
 // Memory access cycle penalties — approximates Sh4Cycles
@@ -1457,11 +1458,9 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 		int cc_after = ctx.cycle_counter;
 		blocks_run++;
 
-		if (debug_count < 20) {
-			debug_count++;
-			EM_ASM({ console.log('[cc-trace] pc=0x' + ($0>>>0).toString(16) + ' cc:' + $1 + '->' + $2 + ' delta=' + ($1-$2)); },
-				pc, cc_before, cc_after);
-		}
+		// Count idle loops (block set cc to 0 = consumed entire remaining timeslice)
+		if (cc_after == 0) g_idle_zeroed++;
+		debug_count++;
 	}
 
 	g_dispatch_result = 0;  // timeslice complete
@@ -2140,9 +2139,12 @@ public:
 				prof_idle_loops_detected  // $11 idle loops
 			);
 
-			// Multi-block stats (separate EM_ASM to avoid 16-arg limit)
-			EM_ASM({ console.log('Multi-blocks:     ' + $0 + ' modules (' + $1 + ' blocks)'); },
-				prof_multiblock_modules, prof_multiblock_total_blocks);
+			// Multi-block + idle stats (separate EM_ASM to avoid 16-arg limit)
+			EM_ASM({
+				console.log('Multi-blocks:     ' + $0 + ' modules (' + $1 + ' blocks)');
+				console.log('Idle-zeroed:      ' + $2 + '/' + $3 + ' (' + ($2/$3*100).toFixed(1) + '% of blocks set cc=0)');
+			}, prof_multiblock_modules, prof_multiblock_total_blocks, g_idle_zeroed, blockExecs);
+			g_idle_zeroed = 0;  // reset for next mainloop
 
 			// Dump top fallback ops by frequency
 			struct FbEntry { int op; u32 count; };
