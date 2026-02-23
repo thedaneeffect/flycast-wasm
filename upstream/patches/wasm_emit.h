@@ -80,12 +80,16 @@ struct RegCache {
 			if (op.rd2.is_r32i()) addOffset(op.rd2.reg_offset());
 			// shop_jdyn writes to JDYN (not a register param)
 			if (op.op == shop_jdyn) addOffset(ctx_off::JDYN);
-			// shop_jcond writes to SR_T (usually found via comparison rd too)
-			if (op.op == shop_jcond) addOffset(ctx_off::SR_T);
+			// shop_jcond writes to jdyn (rd = reg_pc_dyn), not sr.T
+			if (op.op == shop_jcond) addOffset(ctx_off::JDYN);
 		}
 		// Block exit may read sr.T or jdyn
 		u32 bcls = BET_GET_CLS(block->BlockType);
-		if (bcls == BET_CLS_COND) addOffset(ctx_off::SR_T);
+		if (bcls == BET_CLS_COND) {
+			// Delayed conditional (BT/S, BF/S) reads jdyn; immediate reads sr.T
+			if (block->has_jcond) addOffset(ctx_off::JDYN);
+			else addOffset(ctx_off::SR_T);
+		}
 		if (bcls == BET_CLS_Dynamic) addOffset(ctx_off::JDYN);
 	}
 
@@ -857,18 +861,31 @@ static void emitBlockExit(WasmModuleBuilder& b, RuntimeBlockInfo* block, const R
 	}
 
 	case BET_CLS_COND: {
-		// if (sr.T == cond) pc = BranchBlock else pc = NextBlock
+		// if (cond_val == cond) pc = BranchBlock else pc = NextBlock
+		// For delayed conditional (BT/S, BF/S): cond_val = jdyn (saved before delay slot)
+		// For immediate conditional (BT, BF): cond_val = sr.T
 		u32 cond = (block->BlockType == BET_Cond_1) ? 1 : 0;
 
 		b.op_local_get(LOCAL_CTX);  // base for store
 
-		// Read sr.T from cached local if available
-		s32 srTLocal = cache.getLocal(ctx_off::SR_T);
-		if (srTLocal >= 0) {
-			b.op_local_get((u32)srTLocal);
+		if (block->has_jcond) {
+			// Read jdyn (condition saved before delay slot)
+			s32 jdynLocal = cache.getLocal(ctx_off::JDYN);
+			if (jdynLocal >= 0) {
+				b.op_local_get((u32)jdynLocal);
+			} else {
+				b.op_local_get(LOCAL_CTX);
+				b.op_i32_load(ctx_off::JDYN);
+			}
 		} else {
-			b.op_local_get(LOCAL_CTX);
-			b.op_i32_load(ctx_off::SR_T);
+			// Read sr.T directly
+			s32 srTLocal = cache.getLocal(ctx_off::SR_T);
+			if (srTLocal >= 0) {
+				b.op_local_get((u32)srTLocal);
+			} else {
+				b.op_local_get(LOCAL_CTX);
+				b.op_i32_load(ctx_off::SR_T);
+			}
 		}
 		if (cond == 1) {
 			b.op_if(WASM_TYPE_I32);

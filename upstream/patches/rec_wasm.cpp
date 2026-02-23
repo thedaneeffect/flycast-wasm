@@ -38,6 +38,9 @@
 #include <emscripten.h>
 #endif
 
+// Set to 1 to force C++ SHIL interpreter dispatch (diagnostic, bypasses WASM blocks)
+#define FORCE_CPP_DISPATCH 0
+
 // Naomi serial EEPROM diagnostic counters (defined in naomi.cpp)
 extern u32 g_naomi_board_write_count;
 extern u32 g_naomi_board_read_count;
@@ -73,6 +76,7 @@ int wasm_prof_exec_count();
 static std::unordered_map<u32, RuntimeBlockInfo*> blockByVaddr;
 // SMC (self-modifying code) detection: store first word of block code
 static std::unordered_map<u32, u32> blockCodeHash;
+static std::unordered_map<u32, u32> blockExecCount;   // PC → execution count (per mainloop)
 
 // ============================================================
 // Deferred exception handling for shop_ifb
@@ -408,15 +412,18 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		break;
 	}
 	case shop_ftrv: {
-		// 4x4 matrix * 4-element vector with double accumulation (matches canonical)
+		// 4x4 matrix * 4-element vector with double accumulation
+		// Copy input vector to temp to handle rd == rs1 aliasing (FTRV is in-place)
 		u32 voff = op.rs1.reg_offset(), moff = op.rs2.reg_offset();
 		u32 doff = op.rd.reg_offset();
+		float vin[4];
+		for (int j = 0; j < 4; j++)
+			vin[j] = *(float*)((u8*)&ctx + voff + j * 4);
 		for (int i = 0; i < 4; i++) {
 			double sum = 0;
 			for (int j = 0; j < 4; j++) {
 				float m = *(float*)((u8*)&ctx + moff + (j * 4 + i) * 4);
-				float v = *(float*)((u8*)&ctx + voff + j * 4);
-				sum += (double)m * (double)v;
+				sum += (double)m * (double)vin[j];
 			}
 			*(float*)((u8*)&ctx + doff + i * 4) = (float)sum;
 		}
@@ -524,7 +531,10 @@ void EMSCRIPTEN_KEEPALIVE wasm_exec_shil_fb(u32 block_vaddr, u32 op_index) {
 		break;
 	}
 	case shop_jcond:
-		ctx.sr.T = readI32(op.rs1);
+		// Save sr.T into jdyn for delayed conditional branches (BT/S, BF/S).
+		// The condition is evaluated BEFORE the delay slot but the branch
+		// happens AFTER, so we stash the condition in jdyn.
+		writeI32(op.rd, readI32(op.rs1));
 		break;
 	case shop_readm: {
 		u32 addr = readI32(op.rs1);
@@ -851,12 +861,16 @@ static void applyBlockExitCpp(RuntimeBlockInfo* block) {
 	case BET_CLS_Dynamic:
 		ctx.pc = ctx.jdyn;
 		break;
-	case BET_CLS_COND:
+	case BET_CLS_COND: {
+		// For delayed conditional branches (BT/S, BF/S), the condition was
+		// saved in jdyn by shop_jcond before the delay slot executed.
+		u32 cond_val = block->has_jcond ? ctx.jdyn : ctx.sr.T;
 		if (block->BlockType == BET_Cond_1)
-			ctx.pc = ctx.sr.T ? block->BranchBlock : block->NextBlock;
+			ctx.pc = cond_val ? block->BranchBlock : block->NextBlock;
 		else // BET_Cond_0
-			ctx.pc = ctx.sr.T ? block->NextBlock : block->BranchBlock;
+			ctx.pc = cond_val ? block->NextBlock : block->BranchBlock;
 		break;
+	}
 	}
 }
 
@@ -2009,15 +2023,57 @@ public:
 					u32 ctx_ptr = (u32)(uintptr_t)sh4ctx;
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
-					// Restored: WASM dispatch via call_indirect (SHIL path)
+					u32 exit_ts_complete = 0, exit_miss = 0, exit_miss_then_compiled = 0;
+#if FORCE_CPP_DISPATCH
+					// DIAGNOSTIC: Pure C++ block execution (no WASM blocks).
+					// Same mainloop structure as JIT, but blocks run via C++ SHIL interpreter.
+					while (sh4ctx->cycle_counter > 0) {
+						u32 pc = sh4ctx->pc;
+						auto it = blockByVaddr.find(pc);
+						if (it == blockByVaddr.end()) {
+							rdv_FailedToFindBlock(pc);
+							it = blockByVaddr.find(pc);
+						}
+						if (it == blockByVaddr.end()) {
+							// Can't find/compile block — interpret one instruction
+							sh4ctx->pc = pc + 2;
+							u16 rawOp = IReadMem16(pc);
+							if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
+								throw SH4ThrownException(pc, Sh4Ex_FpuDisabled);
+							OpPtr[rawOp](sh4ctx, rawOp);
+							sh4ctx->cycle_counter -= 1;
+							interpExecs++;
+						} else {
+							RuntimeBlockInfo* block = it->second;
+							// Execute block via C++ SHIL interpreter
+							sh4ctx->cycle_counter -= block->guest_cycles;
+							g_ifb_exception_pending = false;
+							for (u32 i = 0; i < block->oplist.size(); i++)
+								wasm_exec_shil_fb(block->vaddr, i);
+							applyBlockExitCpp(block);
+							if (g_ifb_exception_pending) {
+								Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+								g_ifb_exception_pending = false;
+							}
+							blockExecs++;
+							g_wasm_block_count++;
+							blockExecCount[pc]++;
+						}
+						if (sh4ctx->interrupt_pend)
+							UpdateINTC();
+					}
+					exit_ts_complete++;
+#else
 					while (sh4ctx->cycle_counter > 0) {
 						int nblocks = c_dispatch_loop(ctx_ptr, ram_ptr);
 						blockExecs += nblocks;
 						g_wasm_block_count += nblocks;
 
 						if (g_dispatch_result == 0) {
+							exit_ts_complete++;
 							break;  // timeslice complete
 						} else if (g_dispatch_result == 1) {
+							exit_miss++;
 							// Cache miss — compile the block
 							u32 miss_pc = g_dispatch_miss_pc;
 							auto it = blockByVaddr.find(miss_pc);
@@ -2034,10 +2090,18 @@ public:
 								sh4ctx->cycle_counter -= 1;
 								interpExecs++;
 							}
+							// Block now compiled — dispatch loop will find it next iteration
 						} else if (g_dispatch_result == 3) {
 							// Interrupt pending
 							UpdateINTC();
 						}
+					}
+#endif
+
+					// Debug: log dispatch loop exit reasons (first 3 mainloops)
+					if (mainloop_count <= 3 && timeslices < 5) {
+						EM_ASM({ console.log('[dispatch-debug] ts#' + $0 + ': cc_before=' + $1 + ' blocks=' + $2 + ' exit_ts=' + $3 + ' exit_miss=' + $4); },
+							timeslices, sh4ctx->cycle_counter, blockExecs, exit_ts_complete, exit_miss);
 					}
 
 					double emu_t1 = emscripten_get_now();
@@ -2177,6 +2241,7 @@ public:
 		memset(jit_dispatch_table, 0, sizeof(jit_dispatch_table));
 		blockByVaddr.clear();
 		blockCodeHash.clear();
+		blockExecCount.clear();
 		compiledCount = 0;
 		failCount = 0;
 #ifdef __EMSCRIPTEN__
