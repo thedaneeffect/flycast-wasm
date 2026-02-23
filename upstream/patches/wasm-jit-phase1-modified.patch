@@ -1955,7 +1955,7 @@ index 9a4b855..031fd86 100644
  detect_architecture("__aarch64__" arm64)
  detect_architecture("_M_ARM64" arm64)
 diff --git a/shell/libretro/libretro.cpp b/shell/libretro/libretro.cpp
-index 9dcc6b3..0e6b1bc 100644
+index 9dcc6b3..9b4e7c2 100644
 --- a/shell/libretro/libretro.cpp
 +++ b/shell/libretro/libretro.cpp
 @@ -18,6 +18,9 @@
@@ -1968,7 +1968,75 @@ index 9dcc6b3..0e6b1bc 100644
  #ifndef _WIN32
  #include <sys/time.h>
  #endif
-@@ -1275,6 +1278,22 @@ void retro_run()
+@@ -1198,6 +1201,67 @@ static void update_variables(bool first_startup)
+ 
+ void retro_run()
+ {
++#ifdef __EMSCRIPTEN__
++	// Frame pacing: cap at ~60fps regardless of display refresh rate.
++	// On 120Hz+ monitors, rAF fires faster than 60Hz, causing 2x+ game speed.
++	{
++		static double last_frame_ms = 0;
++		static int real_frames = 0;
++		static int skipped_frames = 0;
++		static double hud_last_update = 0;
++
++		double now = emscripten_get_now();
++
++		if (last_frame_ms > 0 && (now - last_frame_ms) < 15.0) {
++			skipped_frames++;
++			video_cb(0, framebufferWidth, framebufferHeight, 0);
++			// Update HUD even on skipped frames so skip count stays current
++			if (now - hud_last_update >= 1000.0) {
++				double speed_pct = (real_frames / 60.0) * 100.0;
++				EM_ASM({
++					var el = document.getElementById('fc-hud');
++					if (!el) {
++						el = document.createElement('div');
++						el.id = 'fc-hud';
++						el.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;'
++							+ 'background:rgba(0,0,0,0.7);color:#fff;font:12px monospace;'
++							+ 'padding:4px 8px;pointer-events:none;border-radius:3px;';
++						document.body.appendChild(el);
++					}
++					el.textContent = 'FPS:' + $0 + ' Skip:' + $1 + ' Speed:' + $2.toFixed(0) + '%';
++				}, real_frames, skipped_frames, speed_pct);
++				real_frames = 0;
++				skipped_frames = 0;
++				hud_last_update = now;
++			}
++			return;
++		}
++		last_frame_ms = now;
++		real_frames++;
++
++		// Update HUD once per second
++		if (hud_last_update == 0) hud_last_update = now;
++		if (now - hud_last_update >= 1000.0) {
++			double speed_pct = (real_frames / 60.0) * 100.0;
++			EM_ASM({
++				var el = document.getElementById('fc-hud');
++				if (!el) {
++					el = document.createElement('div');
++					el.id = 'fc-hud';
++					el.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;'
++						+ 'background:rgba(0,0,0,0.7);color:#fff;font:12px monospace;'
++						+ 'padding:4px 8px;pointer-events:none;border-radius:3px;';
++					document.body.appendChild(el);
++				}
++				el.textContent = 'FPS:' + $0 + ' Skip:' + $1 + ' Speed:' + $2.toFixed(0) + '%';
++			}, real_frames, skipped_frames, speed_pct);
++			real_frames = 0;
++			skipped_frames = 0;
++			hud_last_update = now;
++		}
++	}
++#endif
++
+ 	bool updated = false;
+ 	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+ 		update_variables(false);
+@@ -1275,6 +1339,22 @@ void retro_run()
  		environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avinfo);
  	}
  
@@ -1991,7 +2059,7 @@ index 9dcc6b3..0e6b1bc 100644
  	video_cb(is_dupe ? 0 : RETRO_HW_FRAME_BUFFER_VALID, framebufferWidth, framebufferHeight, 0);
  
  	if (!config::ThreadedRendering || config::LimitFPS)
-@@ -3579,24 +3598,30 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
+@@ -3579,24 +3659,30 @@ static void retro_keyboard_event(bool down, unsigned keycode, uint32_t character
  
  void fatal_error(const char* text, ...)
  {
