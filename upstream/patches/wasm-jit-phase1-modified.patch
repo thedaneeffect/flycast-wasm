@@ -6603,7 +6603,7 @@ index 0538b3c..a29677e 100644
 +	PT_ALPHA_REF        = 0x000000FF;
 +}
 diff --git a/core/hw/sh4/dyna/driver.cpp b/core/hw/sh4/dyna/driver.cpp
-index 4e1fbf3..9e4feae 100644
+index 4e1fbf3..79f48d2 100644
 --- a/core/hw/sh4/dyna/driver.cpp
 +++ b/core/hw/sh4/dyna/driver.cpp
 @@ -1,6 +1,10 @@
@@ -6628,7 +6628,7 @@ index 4e1fbf3..9e4feae 100644
  constexpr u32 CODE_SIZE = 10_MB;
  constexpr u32 TEMP_CODE_SIZE = 1_MB;
  constexpr u32 FULL_SIZE = CODE_SIZE + TEMP_CODE_SIZE;
-@@ -342,26 +350,55 @@ void Sh4Recompiler::Reset(bool hard)
+@@ -342,26 +350,77 @@ void Sh4Recompiler::Reset(bool hard)
  void Sh4Recompiler::Init()
  {
  	INFO_LOG(DYNAREC, "Sh4Recompiler::Init");
@@ -6636,16 +6636,38 @@ index 4e1fbf3..9e4feae 100644
 +	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — DIAGNOSTIC: super::Init() only, skipping rest'); });
 +#endif
  	super::Init();
-+#ifdef __EMSCRIPTEN__
-+	// DIAGNOSTIC: return early to isolate which Init sub-call causes rendering garbage
-+	return;
-+#endif
  	bm_Init();
 -	
 +
  	if (addrspace::virtmemEnabled())
  		verify(&mem_b[0] == ((u8*)getContext()->sq_buffer + sizeof(Sh4Context) + 0x0C000000));
  
++	// Call the platform-specific magic to make the pages RWX
++	CodeCache = nullptr;
++#ifdef FEAT_NO_RWX_PAGES
++	{
++		bool rc = virtmem::prepare_jit_block(SH4_TCB, FULL_SIZE, (void**)&CodeCache, &cc_rx_offset);
++		verify(rc);
++	}
++#else
++	{
++		bool rc = virtmem::prepare_jit_block(SH4_TCB, FULL_SIZE, (void**)&CodeCache);
++		verify(rc);
++	}
++#endif
++	verify(CodeCache != nullptr);
++	TempCodeCache = CodeCache + CODE_SIZE;
++
++#ifdef __EMSCRIPTEN__
++	// DIAGNOSTIC: return after bm_Init + prepare_jit_block, skip wasm_dynarec_init/sh4Dynarec->init/bm_ResetCache
++	EM_ASM({ console.log('[rec_wasm] DIAGNOSTIC: Init() returning after prepare_jit_block, skipping dynarec init + bm_ResetCache'); });
++	return;
++#endif
++	bm_Init();
++
++	if (addrspace::virtmemEnabled())
++		verify(&mem_b[0] == ((u8*)getContext()->sq_buffer + sizeof(Sh4Context) + 0x0C000000));
++
 +#ifdef __EMSCRIPTEN__
 +	EM_ASM({ console.log('[rec_wasm] Sh4Recompiler::Init() — step 3: prepare_jit_block()'); });
 +#endif
