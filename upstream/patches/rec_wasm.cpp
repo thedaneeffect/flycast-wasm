@@ -28,6 +28,8 @@
 #include "wasm_emit.h"
 
 #include <unordered_map>
+#include <set>
+#include <string>
 #include <cmath>
 #include <cstring>
 
@@ -134,6 +136,14 @@ static u32 jit_dispatch_table[JIT_TABLE_SIZE];  // PC hash → table index (0 = 
 static int g_dispatch_result = 0;    // 0=timeslice, 1=miss, 3=interrupt
 static u32 g_dispatch_miss_pc = 0;
 static u32 g_idle_zeroed = 0;  // blocks that set cycle_counter to exactly 0
+
+// ============================================================
+// Hot block tracking — per-block execution counts + opcode lists
+// ============================================================
+// Tracks which blocks execute most frequently (for lock-up diagnosis).
+// blockOpcodeStr stores a human-readable SHIL opcode list per block PC.
+static std::unordered_map<u32, u32> blockExecCount;   // PC → execution count (per mainloop)
+static std::unordered_map<u32, std::string> blockOpcodeStr;  // PC → "readm,add,seteq,..."
 
 // ============================================================
 // Memory access cycle penalties — approximates Sh4Cycles
@@ -793,6 +803,12 @@ extern u32 g_wasm_block_count;
 // which made per-instruction cycle charging always active in ref_execute_block.
 #define EXECUTOR_MODE 6
 #define SHIL_START_BLOCK 24168000
+
+// DIAGNOSTIC: Bypass WASM blocks entirely. Run blocks via C++ SHIL interpreter
+// with the JIT's mainloop structure (same dispatch, timing, scheduling).
+// If rendering is still garbage with this: problem is in mainloop/timing.
+// If rendering is fixed: problem is in WASM block structure.
+#define FORCE_CPP_DISPATCH 0
 
 // Reference executor: per-instruction via OpPtr
 // Per-instruction cycle counting (1 per instruction executed)
@@ -1458,6 +1474,7 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
 		fn(ctx_ptr, ram_base);
 		blocks_run++;
+		blockExecCount[pc]++;
 
 		if (ctx.cycle_counter == 0) g_idle_zeroed++;
 
@@ -1597,7 +1614,10 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
 
-	// Idle loop fast-forward: set cycle_counter = 0 when looping back to self
+	// Idle loop fast-forward: DISABLED for debugging rendering corruption
+	// When enabled, this burns through timeslices instantly for self-looping blocks,
+	// potentially desynchronizing PVR rendering events from SH4 execution.
+#if 0
 	if (is_idle_loop) {
 		if (bcls == BET_CLS_Static) {
 			// Unconditional self-loop: always fast-forward
@@ -1617,6 +1637,7 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 			b.op_end();
 		}
 	}
+#endif
 
 	b.endFuncBody();
 	b.endSection();
@@ -1982,11 +2003,39 @@ public:
 			codeBuffer->advance(4);
 
 #ifdef __EMSCRIPTEN__
-		if (compiledCount <= 10 || (compiledCount % 200 == 0)) {
-			EM_ASM({ console.log('[rec_wasm] compiled=' + $0 + ' fail=' + $1 +
-				' pc=0x' + ($2>>>0).toString(16) + ' ops=' + $3 + ' cycles=' + $4); },
-				compiledCount, failCount, block->vaddr,
-				(int)block->oplist.size(), block->guest_cycles);
+		// Store SHIL opcode string for hot block diagnostics
+		{
+			std::string ops;
+			std::set<int> seen;
+			for (auto& op : block->oplist) {
+				if (seen.insert(op.op).second) {
+					if (!ops.empty()) ops += ",";
+					ops += shil_opcode_name(op.op);
+				}
+			}
+			blockOpcodeStr[block->vaddr] = ops;
+		}
+
+		// Log every compiled block with SHIL opcode list
+		{
+			// Build full SHIL disassembly string for this block
+			std::string shilList;
+			for (u32 i = 0; i < block->oplist.size(); i++) {
+				if (i > 0) shilList += " | ";
+				shilList += block->oplist[i].dissasm();
+			}
+			EM_ASM({ console.log('[BLOCK] #' + $0 +
+				' pc=0x' + ($1>>>0).toString(16) +
+				' nops=' + $2 + ' cycles=' + $3 +
+				' exit=' + $4 +
+				' branch=0x' + ($5>>>0).toString(16) +
+				' next=0x' + ($6>>>0).toString(16) +
+				'\n  SHIL: ' + UTF8ToString($7)); },
+				compiledCount, block->vaddr,
+				(int)block->oplist.size(), block->guest_cycles,
+				(int)block->BlockType,
+				block->BranchBlock, block->NextBlock,
+				shilList.c_str());
 		}
 #endif
 	}
@@ -2020,6 +2069,46 @@ public:
 					u32 ram_ptr = (u32)(uintptr_t)&mem_b[0];
 
 					u32 exit_ts_complete = 0, exit_miss = 0, exit_miss_then_compiled = 0;
+#if FORCE_CPP_DISPATCH
+					// DIAGNOSTIC: Pure C++ block execution (no WASM blocks).
+					// Same mainloop structure as JIT, but blocks run via C++ SHIL interpreter.
+					while (sh4ctx->cycle_counter > 0) {
+						u32 pc = sh4ctx->pc;
+						auto it = blockByVaddr.find(pc);
+						if (it == blockByVaddr.end()) {
+							rdv_FailedToFindBlock(pc);
+							it = blockByVaddr.find(pc);
+						}
+						if (it == blockByVaddr.end()) {
+							// Can't find/compile block — interpret one instruction
+							sh4ctx->pc = pc + 2;
+							u16 rawOp = IReadMem16(pc);
+							if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
+								throw SH4ThrownException(pc, Sh4Ex_FpuDisabled);
+							OpPtr[rawOp](sh4ctx, rawOp);
+							sh4ctx->cycle_counter -= 1;
+							interpExecs++;
+						} else {
+							RuntimeBlockInfo* block = it->second;
+							// Execute block via C++ SHIL interpreter
+							sh4ctx->cycle_counter -= block->guest_cycles;
+							g_ifb_exception_pending = false;
+							for (u32 i = 0; i < block->oplist.size(); i++)
+								wasm_exec_shil_fb(block->vaddr, i);
+							applyBlockExitCpp(block);
+							if (g_ifb_exception_pending) {
+								Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+								g_ifb_exception_pending = false;
+							}
+							blockExecs++;
+							g_wasm_block_count++;
+							blockExecCount[pc]++;
+						}
+						if (sh4ctx->interrupt_pend)
+							UpdateINTC();
+					}
+					exit_ts_complete++;
+#else
 					while (sh4ctx->cycle_counter > 0) {
 						int nblocks = c_dispatch_loop(ctx_ptr, ram_ptr);
 						blockExecs += nblocks;
@@ -2052,6 +2141,7 @@ public:
 							UpdateINTC();
 						}
 					}
+#endif
 
 					// Debug: log dispatch loop exit reasons (first 3 mainloops)
 					if (mainloop_count <= 3 && timeslices < 5) {
@@ -2199,6 +2289,31 @@ public:
 				}
 			}
 
+			// Dump top 10 hot blocks (most executed this mainloop)
+			{
+				struct HotEntry { u32 pc; u32 count; };
+				HotEntry hot[10] = {};
+				for (auto& [pc, cnt] : blockExecCount) {
+					for (int j = 0; j < 10; j++) {
+						if (cnt > hot[j].count) {
+							for (int k = 9; k > j; k--) hot[k] = hot[k-1];
+							hot[j] = { pc, cnt };
+							break;
+						}
+					}
+				}
+				EM_ASM({ console.log('--- Hot Blocks (top 10 this mainloop) ---'); });
+				for (int j = 0; j < 10 && hot[j].count > 0; j++) {
+					auto it = blockOpcodeStr.find(hot[j].pc);
+					const char* ops = (it != blockOpcodeStr.end()) ? it->second.c_str() : "?";
+					EM_ASM({ console.log('  PC=0x' + ($0>>>0).toString(16) +
+						' execs=' + $1.toLocaleString() +
+						' ops=[' + UTF8ToString($2) + ']'); },
+						hot[j].pc, hot[j].count, ops);
+				}
+				blockExecCount.clear();
+			}
+
 			// Reset profiling for next mainloop
 			prof_emulation_ms = 0;
 			prof_system_ms = 0;
@@ -2222,6 +2337,8 @@ public:
 		memset(prof_fallback_opset, 0, sizeof(prof_fallback_opset));
 		blockByVaddr.clear();
 		blockCodeHash.clear();
+		blockExecCount.clear();
+		blockOpcodeStr.clear();
 		compiledCount = 0;
 		failCount = 0;
 #ifdef __EMSCRIPTEN__

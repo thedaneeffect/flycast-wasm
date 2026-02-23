@@ -3,6 +3,11 @@
 // Translates individual SHIL IR opcodes into WASM instructions using
 // WasmModuleBuilder. Operates on Sh4Context in shared linear memory.
 
+// Set to 1 to force ALL SHIL ops through the C++ fallback interpreter.
+// Blocks still compile to WASM (structure, exit logic, dispatch intact),
+// but every op calls wasm_exec_shil_fb. Used to bisect native vs structural bugs.
+#define FORCE_INTERPRETER_FALLBACK 0
+
 #pragma once
 #include "wasm_module_builder.h"
 #include "hw/sh4/dyna/shil.h"
@@ -253,6 +258,10 @@ static inline void emitReloadAll(WasmModuleBuilder& b, RegCache& cache) {
 // ============================================================
 static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
                         RuntimeBlockInfo* block, u32 opIndex, RegCache& cache) {
+#if FORCE_INTERPRETER_FALLBACK
+	// Force all ops through C++ fallback — block structure + exit still WASM
+	return false;
+#endif
 	switch (op.op) {
 
 	// ---- Tier 1: Integer ALU ----
