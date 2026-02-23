@@ -1430,7 +1430,8 @@ EM_JS(int, wasm_prof_exec_count, (), {
 // Returns number of blocks executed. g_dispatch_result indicates exit reason:
 //   0 = timeslice complete (cycle_counter <= 0)
 //   1 = cache miss (g_dispatch_miss_pc = PC needing compilation)
-//   3 = interrupt pending (needs C++ UpdateINTC)
+// Matches native x64/ARM64 dynarec: NO interrupt check between blocks.
+// Interrupts are handled at the timeslice boundary via UpdateSystem_INTC().
 static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 	typedef void (*block_fn_t)(u32, u32);
 	Sh4Context& ctx = Sh4cntx;
@@ -1452,11 +1453,6 @@ static int c_dispatch_loop(u32 ctx_ptr, u32 ram_base) {
 		block_fn_t fn = (block_fn_t)(uintptr_t)table_idx;
 		fn(ctx_ptr, ram_base);
 		blocks_run++;
-
-		if (ctx.interrupt_pend) {
-			g_dispatch_result = 3;  // interrupt
-			return blocks_run;
-		}
 	}
 
 	g_dispatch_result = 0;  // timeslice complete
@@ -2032,9 +2028,6 @@ public:
 								interpExecs++;
 							}
 							// Block now compiled — dispatch loop will find it next iteration
-						} else if (g_dispatch_result == 3) {
-							// Interrupt pending
-							UpdateINTC();
 						}
 					}
 
