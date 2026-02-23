@@ -1550,8 +1550,9 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp i32 + N cached register i32s
-	u32 totalExtraLocals = 1 + cache.localCount();
+	// Locals: 1 temp i32 + N cached register i32s + 1 cc_save i32
+	u32 LOCAL_CC_SAVE = cache.nextLocal;  // first free local after cache entries
+	u32 totalExtraLocals = 2 + cache.localCount();  // tmp + cached + cc_save
 	u32 lc = totalExtraLocals;
 	u8 lt = WASM_TYPE_I32;
 	b.emitLocals(1, &lc, &lt);
@@ -1563,13 +1564,18 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 		b.op_local_set(entry.wasmLocal);
 	}
 
-	// Prologue: cycle_counter -= guest_cycles
+	// Prologue: cycle_counter -= guest_cycles, save expected value
+	// SHIL fallback ops (shil_fb, ifb) can corrupt cycle_counter as a side effect
+	// (e.g., fastmmu TLB miss charges 164 cycles, ReadMem/WriteMem MMIO handlers).
+	// Save the correct post-subtraction value and restore it at block exit,
+	// matching the forced reset in the SHIL executor path (EXECUTOR_MODE != 6).
+	b.op_local_get(LOCAL_CTX);  // [ctx]  (for i32.store later)
 	b.op_local_get(LOCAL_CTX);
-	b.op_local_get(LOCAL_CTX);
-	b.op_i32_load(ctx_off::CYCLE_COUNTER);
+	b.op_i32_load(ctx_off::CYCLE_COUNTER);  // [ctx, cc]
 	b.op_i32_const((s32)block->guest_cycles);
-	b.op_i32_sub();
-	b.op_i32_store(ctx_off::CYCLE_COUNTER);
+	b.op_i32_sub();             // [ctx, cc-guest_cycles]
+	b.op_local_tee(LOCAL_CC_SAVE);  // save expected cc value, keep on stack
+	b.op_i32_store(ctx_off::CYCLE_COUNTER);  // store to ctx[0x174]
 
 	// Emit each SHIL op with register cache
 	for (u32 i = 0; i < block->oplist.size(); i++) {
@@ -1592,6 +1598,11 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
+
+	// Restore cycle_counter from saved value (undo any corruption by fallback ops)
+	b.op_local_get(LOCAL_CTX);
+	b.op_local_get(LOCAL_CC_SAVE);
+	b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 	// Idle loop fast-forward: set cycle_counter = 0 when looping back to self
 	if (is_idle_loop) {
@@ -1700,8 +1711,9 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 		pcToIdx[chain[i]->vaddr] = i;
 	}
 
-	// Extra local for dispatch index
+	// Extra locals for dispatch index and cc_save
 	u32 LOCAL_NEXT_IDX = 3 + cache.localCount();
+	u32 LOCAL_CC_SAVE = LOCAL_NEXT_IDX + 1;
 
 	b.emitHeader();
 
@@ -1738,8 +1750,8 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 	b.beginCodeSection(1);
 	b.beginFuncBody();
 
-	// Locals: 1 temp + N cached regs + 1 dispatch index
-	u32 totalExtraLocals = 1 + cache.localCount() + 1;
+	// Locals: 1 temp + N cached regs + 1 dispatch index + 1 cc_save
+	u32 totalExtraLocals = 1 + cache.localCount() + 2;
 	u32 lc = totalExtraLocals;
 	u8 lt = WASM_TYPE_I32;
 	b.emitLocals(1, &lc, &lt);
@@ -1784,12 +1796,13 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 		for (auto& [offset, entry] : cache.entries)
 			entry.dirty = true;
 
-		// Decrement cycle_counter
+		// Decrement cycle_counter (save expected value for restore after SHIL ops)
+		b.op_local_get(LOCAL_CTX);  // [ctx]
 		b.op_local_get(LOCAL_CTX);
-		b.op_local_get(LOCAL_CTX);
-		b.op_i32_load(ctx_off::CYCLE_COUNTER);
+		b.op_i32_load(ctx_off::CYCLE_COUNTER);  // [ctx, cc]
 		b.op_i32_const((s32)blk->guest_cycles);
-		b.op_i32_sub();
+		b.op_i32_sub();             // [ctx, cc-gc]
+		b.op_local_tee(LOCAL_CC_SAVE);
 		b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 		// Emit SHIL ops (shared cache, ifb/shil_fb uses flush+reload)
@@ -1809,6 +1822,11 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 
 		// Block exit: writes next PC to ctx memory
 		emitBlockExit(b, blk, cache);
+
+		// Restore cycle_counter from saved value (undo SHIL fallback corruption)
+		b.op_local_get(LOCAL_CTX);
+		b.op_local_get(LOCAL_CC_SAVE);
+		b.op_i32_store(ctx_off::CYCLE_COUNTER);
 
 		// Route to next block or exit
 		u32 bcls_blk = BET_GET_CLS(blk->BlockType);
