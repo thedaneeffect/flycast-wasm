@@ -1811,6 +1811,24 @@ static bool buildMultiBlockModule(WasmModuleBuilder& b,
 		b.op_i32_eq();
 		b.op_if();  // if body: $exit=br(2), $dispatch=br(1), this if=br(0)
 
+		// SMC guard for interior blocks: verify first opcode hasn't changed.
+		// Entry block (i==0) is already checked by the dispatch loop.
+		// Only guard RAM blocks (area 3: 0x0C/0x8C/0xAC addresses).
+		if (i > 0) {
+			u32 phys = blk->vaddr & 0x1FFFFFFF;
+			if ((phys >> 26) == 3) {
+				u32 ramOffset = phys & 0x00FFFFFF;
+				u16 expectedOp = IReadMem16(blk->vaddr);
+				b.op_local_get(LOCAL_RAM);
+				b.op_i32_const((s32)ramOffset);
+				b.op_i32_add();
+				b.op_i32_load16_u(0);
+				b.op_i32_const((s32)(u32)expectedOp);
+				b.op_i32_ne();
+				b.op_br_if(2);  // br $exit — SMC detected
+			}
+		}
+
 		// Mark all entries dirty before this block (conservative: ensures
 		// correct flushing regardless of which previous block executed)
 		for (auto& [offset, entry] : cache.entries)
@@ -1978,10 +1996,16 @@ public:
 		// Only build WASM modules when using WASM execution
 		WasmModuleBuilder builder;
 
-		// Multi-block chaining disabled: interior blocks bypass dispatch-time
-		// SMC check, creating a correctness gap. Re-enable once per-block
-		// SMC guards are emitted inside multi-block modules.
-		buildBlockModule(builder, block);
+		// Try multi-block: chain statically-connected blocks.
+		// Interior blocks have inline SMC guards (direct RAM read + compare).
+		auto chain = discoverChain(block);
+		if (chain.size() >= 2) {
+			buildMultiBlockModule(builder, chain);
+			prof_multiblock_modules++;
+			prof_multiblock_total_blocks += (u32)chain.size();
+		} else {
+			buildBlockModule(builder, block);
+		}
 
 		const auto& bytes = builder.getBytes();
 		int table_idx = wasm_compile_block(bytes.data(), (u32)bytes.size(), block->vaddr);
