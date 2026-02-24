@@ -81,5 +81,16 @@ cp flycast-wasm.data "$DEMO_CORES/flycast-wasm.data"
 echo "Deployed: $(ls -lh "$DEMO_CORES/flycast-wasm.data" | awk '{print $5}')"
 
 echo ""
+echo "=== STEP 6: Cache Bust (EmulatorJS report timestamp) ==="
+REPORT_FILE="$DEMO_CORES/reports/flycast.json"
+if [ -f "$REPORT_FILE" ]; then
+    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+    echo "{ \"core\": \"flycast\", \"buildStart\": \"${TIMESTAMP}\", \"buildEnd\": \"${TIMESTAMP}\", \"options\": { \"defaultWebGL2\": true } }" > "$REPORT_FILE"
+    echo "Cache bust: buildStart=$TIMESTAMP"
+else
+    echo "WARNING: Report file not found at $REPORT_FILE"
+fi
+
+echo ""
 echo "=== BUILD + DEPLOY COMPLETE ==="
 echo "Run test: node upstream/flycast-wasm-test.js"
