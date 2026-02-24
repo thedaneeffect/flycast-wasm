@@ -95,9 +95,13 @@ namespace wop {
 	constexpr u8 f32_sub       = 0x93;
 	constexpr u8 f32_mul       = 0x94;
 	constexpr u8 f32_div       = 0x95;
+	constexpr u8 f64_add       = 0xA0;
+	constexpr u8 f64_mul       = 0xA2;
 	constexpr u8 i32_trunc_f32_s = 0xA8;
 	constexpr u8 f32_convert_i32_s = 0xB2;
+	constexpr u8 f64_promote_f32   = 0xBB;
 	constexpr u8 i32_reinterpret_f32 = 0xBC;
+	constexpr u8 f32_demote_f64    = 0xB6;
 	constexpr u8 f32_reinterpret_i32 = 0xBE;
 }
 
@@ -346,6 +350,12 @@ public:
 	void op_f32_sqrt()  { emitByte(wop::f32_sqrt); }
 	void op_f32_eq()    { emitByte(wop::f32_eq); }
 	void op_f32_gt()    { emitByte(wop::f32_gt); }
+
+	// Double (f64) ops — used for fipr/ftrv double-precision accumulation
+	void op_f64_add()            { emitByte(wop::f64_add); }
+	void op_f64_mul()            { emitByte(wop::f64_mul); }
+	void op_f64_promote_f32()    { emitByte(wop::f64_promote_f32); }
+	void op_f32_demote_f64()     { emitByte(wop::f32_demote_f64); }
 
 	// Conversions
 	void op_i32_trunc_f32_s()    { emitByte(wop::i32_trunc_f32_s); }

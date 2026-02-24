@@ -817,37 +817,47 @@ static bool emitShilOp(WasmModuleBuilder& b, const shil_opcode& op,
 
 	case shop_fipr: {
 		// 4-element dot product: rd = sum(rs1[i] * rs2[i]) for i=0..3
-		// Uses f32 accumulation (matches hardware precision)
+		// Uses f64 accumulation to match reference interpreter (sh4_fpu.cpp)
+		// and shil_canonical.h — prevents 3D geometry drift from f32 rounding.
 		u32 off1 = op.rs1.reg_offset(), off2 = op.rs2.reg_offset();
 		b.op_local_get(LOCAL_CTX);  // base for store
-		// Element 0
+		// Element 0: (f64)rs1[0] * (f64)rs2[0]
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off1);
+		b.op_f64_promote_f32();
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off2);
-		b.op_f32_mul();
-		// Element 1
+		b.op_f64_promote_f32();
+		b.op_f64_mul();
+		// Element 1: + (f64)rs1[1] * (f64)rs2[1]
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off1 + 4);
+		b.op_f64_promote_f32();
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off2 + 4);
-		b.op_f32_mul();
-		b.op_f32_add();
-		// Element 2
+		b.op_f64_promote_f32();
+		b.op_f64_mul();
+		b.op_f64_add();
+		// Element 2: + (f64)rs1[2] * (f64)rs2[2]
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off1 + 8);
+		b.op_f64_promote_f32();
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off2 + 8);
-		b.op_f32_mul();
-		b.op_f32_add();
-		// Element 3
+		b.op_f64_promote_f32();
+		b.op_f64_mul();
+		b.op_f64_add();
+		// Element 3: + (f64)rs1[3] * (f64)rs2[3]
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off1 + 12);
+		b.op_f64_promote_f32();
 		b.op_local_get(LOCAL_CTX);
 		b.op_f32_load(off2 + 12);
-		b.op_f32_mul();
-		b.op_f32_add();
-		// Store result
+		b.op_f64_promote_f32();
+		b.op_f64_mul();
+		b.op_f64_add();
+		// Demote f64 result back to f32 and store
+		b.op_f32_demote_f64();
 		emitStoreRdF32(b, op.rd);
 		return true;
 	}

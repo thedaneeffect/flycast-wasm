@@ -1642,23 +1642,36 @@ static bool buildBlockModule(WasmModuleBuilder& b, RuntimeBlockInfo* block) {
 	// Epilogue: writeback all dirty cached registers to ctx memory
 	emitFlushAll(b, cache);
 
-	// Idle loop fast-forward: set cycle_counter = 0 when looping back to self
+	// Idle loop fast-forward: SOFT version
+	// Instead of zeroing cycle_counter (which fires all scheduler events
+	// instantly), cap it at 32 cycles. The idle loop still fast-forwards
+	// through most of the timeslice but preserves scheduler event timing
+	// to within ~32 cycles precision.
+	// Emits: if (cycle_counter > 32) cycle_counter = 32;
 	if (is_idle_loop) {
+		auto emitSoftFastForward = [&]() {
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_load(ctx_off::CYCLE_COUNTER);
+			b.op_i32_const(32);
+			b.op_i32_gt_s();
+			b.op_if();
+			b.op_local_get(LOCAL_CTX);
+			b.op_i32_const(32);
+			b.op_i32_store(ctx_off::CYCLE_COUNTER);
+			b.op_end();
+		};
+
 		if (bcls == BET_CLS_Static) {
 			// Unconditional self-loop: always fast-forward
-			b.op_local_get(LOCAL_CTX);
-			b.op_i32_const(0);
-			b.op_i32_store(ctx_off::CYCLE_COUNTER);
+			emitSoftFastForward();
 		} else {
 			// Conditional self-loop: fast-forward only when branching back
 			b.op_local_get(LOCAL_CTX);
 			b.op_i32_load(ctx_off::PC);
 			b.op_i32_const((s32)block->vaddr);
 			b.op_i32_eq();
-			b.op_if(); // void block type (0x40)
-			b.op_local_get(LOCAL_CTX);
-			b.op_i32_const(0);
-			b.op_i32_store(ctx_off::CYCLE_COUNTER);
+			b.op_if();
+			emitSoftFastForward();
 			b.op_end();
 		}
 	}
@@ -2202,7 +2215,22 @@ public:
 								compilesThisFrame++;
 								it = blockByVaddr.find(miss_pc);
 								compileTimeThisFrame += (emscripten_get_now() - t0);
-								if (it == blockByVaddr.end()) {
+								if (it != blockByVaddr.end()) {
+									// Compiled — execute via SHIL interpreter
+									RuntimeBlockInfo* block = it->second;
+									sh4ctx->cycle_counter -= block->guest_cycles;
+									sh4ctx->pc = miss_pc;
+									g_ifb_exception_pending = false;
+									for (u32 i = 0; i < block->oplist.size(); i++)
+										wasm_exec_shil_fb(block->vaddr, i);
+									applyBlockExitCpp(block);
+									if (g_ifb_exception_pending) {
+										Do_Exception(g_ifb_exception_epc, g_ifb_exception_expEvn);
+										g_ifb_exception_pending = false;
+									}
+									blockExecs++;
+									g_wasm_block_count++;
+								} else {
 									// Compilation failed — interpret one instruction
 									sh4ctx->pc = miss_pc + 2;
 									u16 rawOp = IReadMem16(miss_pc);
@@ -2213,7 +2241,8 @@ public:
 									interpExecs++;
 								}
 							} else {
-								// Over time budget — interpret one instruction
+								// Over compile budget — interpret one instruction.
+								// Block will be compiled next frame when budget resets.
 								sh4ctx->pc = miss_pc + 2;
 								u16 rawOp = IReadMem16(miss_pc);
 								if (sh4ctx->sr.FD == 1 && OpDesc[rawOp]->IsFloatingPoint())
