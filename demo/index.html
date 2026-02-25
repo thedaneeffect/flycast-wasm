@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flycast WASM — Dreamcast Emulator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #282828;
+      color: #ebdbb2;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    #game {
+      width: 100vw;
+      height: 100vh;
+      background: #1d2021;
+    }
+    .header {
+      text-align: center;
+      padding: 40px 20px 20px;
+    }
+    .header h1 {
+      font-size: 28px;
+      font-weight: 300;
+      letter-spacing: 2px;
+      color: #fe8019;
+      margin-bottom: 8px;
+    }
+    .header p {
+      color: #928374;
+      font-size: 14px;
+    }
+    .status {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      padding: 20px;
+      flex-wrap: wrap;
+    }
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #a89984;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .dot.ok { background: #b8bb26; }
+    .dot.missing { background: #fb4934; }
+    .section {
+      max-width: 800px;
+      width: 100%;
+      padding: 0 20px 20px;
+    }
+    .section h2 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      color: #b8bb26;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(184, 187, 38, 0.3);
+    }
+    .hint {
+      color: #928374;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .upload-btn {
+      display: inline-block;
+      padding: 10px 20px;
+      background: rgba(254, 128, 25, 0.12);
+      border: 1px solid rgba(254, 128, 25, 0.35);
+      border-radius: 8px;
+      color: #fe8019;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-bottom: 16px;
+    }
+    .upload-btn:hover {
+      background: rgba(254, 128, 25, 0.22);
+      border-color: rgba(254, 128, 25, 0.55);
+    }
+    .game-card {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      margin-bottom: 8px;
+      background: #3c3836;
+      border: 1px solid #504945;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .game-card:hover {
+      background: #504945;
+      border-color: #fe8019;
+      transform: translateX(4px);
+    }
+    .game-icon {
+      color: #fe8019;
+      font-size: 18px;
+      width: 32px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .game-name {
+      font-size: 15px;
+      font-weight: 500;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .delete-btn {
+      background: none;
+      border: 1px solid rgba(251, 73, 52, 0.3);
+      color: #fb4934;
+      border-radius: 6px;
+      width: 28px;
+      height: 28px;
+      font-size: 14px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .delete-btn:hover {
+      background: rgba(251, 73, 52, 0.15);
+      border-color: rgba(251, 73, 52, 0.55);
+    }
+    .empty {
+      color: #928374;
+      font-size: 14px;
+      padding: 20px;
+      text-align: center;
+    }
+    #status-msg {
+      color: #83a598;
+      font-size: 13px;
+      text-align: center;
+      padding: 8px;
+      min-height: 30px;
+    }
+    .footer {
+      padding: 30px;
+      text-align: center;
+      color: #665c54;
+      font-size: 12px;
+    }
+    .footer a { color: #fe8019; text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <div id="launcher">
+    <div class="header">
+      <h1>FLYCAST WASM</h1>
+      <p>Sega Dreamcast emulation in the browser via WebAssembly</p>
+    </div>
+
+    <div class="status">
+      <div class="status-item">
+        <div class="dot missing" id="boot-dot"></div>
+        <span id="boot-label">dc_boot.bin (missing)</span>
+      </div>
+      <div class="status-item">
+        <div class="dot missing" id="flash-dot"></div>
+        <span id="flash-label">dc_flash.bin (missing)</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>BIOS Files</h2>
+      <p class="hint">Upload dc_boot.bin and dc_flash.bin</p>
+      <label class="upload-btn">
+        Upload BIOS
+        <input type="file" id="bios-input" accept=".bin" multiple hidden>
+      </label>
+    </div>
+
+    <div class="section">
+      <h2>Games</h2>
+      <label class="upload-btn">
+        Upload ROM
+        <input type="file" id="rom-input" accept=".chd,.cdi,.gdi,.cue,.zip,.iso,.bin,.raw" multiple hidden>
+      </label>
+      <div id="rom-list"></div>
+    </div>
+
+    <div id="status-msg"></div>
+
+    <div class="footer">
+      <a href="https://github.com/nasomers/flycast-wasm">github.com/nasomers/flycast-wasm</a>
+    </div>
+  </div>
+
+  <div id="game" style="display:none"></div>
+
+  <!-- Console noise suppression -->
+  <script>
+    (function() {
+      var origWarn = console.warn;
+      console.warn = function() {
+        if (arguments.length > 0 && typeof arguments[0] === 'string') {
+          var msg = arguments[0];
+          if (msg.indexOf('__syscall_mprotect') !== -1) return;
+          if (msg.indexOf('is not a valid value') !== -1) return;
+        }
+        return origWarn.apply(console, arguments);
+      };
+    })();
+  </script>
+
+  <!-- WebGL2 compatibility patches -->
+  <script>
+    (function() {
+      var origGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+        var ctx = origGetContext.call(this, type, attrs);
+        if (ctx && (type === 'webgl2' || type === 'experimental-webgl2') && !ctx.__flycastPatched) {
+          ctx.__flycastPatched = true;
+          var origGetParam = ctx.getParameter.bind(ctx);
+
+          ctx.getParameter = function(pname) {
+            if (pname === 0x1F02 || pname === ctx.VERSION) {
+              return 'OpenGL ES 3.0 WebGL 2.0';
+            }
+            if (pname === 0x8B8C || pname === ctx.SHADING_LANGUAGE_VERSION) {
+              return 'OpenGL ES GLSL ES 3.00';
+            }
+            return origGetParam(pname);
+          };
+
+          var origGetError = ctx.getError.bind(ctx);
+          ctx.getError = function() {
+            var err = origGetError();
+            while (err === 0x500) { err = origGetError(); }
+            return err;
+          };
+
+          var texBindings = {};
+          texBindings[ctx.TEXTURE_2D] = ctx.TEXTURE_BINDING_2D;
+          texBindings[ctx.TEXTURE_CUBE_MAP] = ctx.TEXTURE_BINDING_CUBE_MAP;
+          if (ctx.TEXTURE_3D) texBindings[ctx.TEXTURE_3D] = ctx.TEXTURE_BINDING_3D;
+          if (ctx.TEXTURE_2D_ARRAY) texBindings[ctx.TEXTURE_2D_ARRAY] = ctx.TEXTURE_BINDING_2D_ARRAY;
+
+          var origTexParameteri = ctx.texParameteri.bind(ctx);
+          ctx.texParameteri = function(target, pname, param) {
+            var b = texBindings[target];
+            if (b && !origGetParam(b)) return;
+            return origTexParameteri(target, pname, param);
+          };
+
+          var origTexParameterf = ctx.texParameterf.bind(ctx);
+          ctx.texParameterf = function(target, pname, param) {
+            var b = texBindings[target];
+            if (b && !origGetParam(b)) return;
+            return origTexParameterf(target, pname, param);
+          };
+
+          // Patch D: Rewrite #version 130 → #version 300 es
+          // RetroArch already prepends #define directives to bridge GLSL 130→300
+          // syntax (attribute→in, varying→out/in, gl_FragColor→FragColor, etc.).
+          // We only need to change the version directive itself.
+          var origShaderSource = ctx.shaderSource.bind(ctx);
+          ctx.shaderSource = function(shader, source) {
+            if (typeof source === 'string' && source.indexOf('#version 130') !== -1) {
+              source = source.replace(/#version 130/g, '#version 300 es');
+              console.log('[flycast-wasm] Rewrote #version 130 → 300 es');
+            }
+            return origShaderSource(shader, source);
+          };
+
+          // Patch F: texImage2D internalformat fix
+          // GL_RED (0x1903) is valid on desktop GL but WebGL2 requires
+          // the sized format GL_R8 (0x8229).
+          var origTexImage2D = ctx.texImage2D.bind(ctx);
+          ctx.texImage2D = function() {
+            var args = Array.prototype.slice.call(arguments);
+            if (args.length >= 3 && args[2] === 0x1903) args[2] = 0x8229;
+            return origTexImage2D.apply(null, args);
+          };
+
+          // Patch E: Fallback for any shader that fails to compile
+          // RetroArch's XMB menu shaders are not essential for gameplay.
+          // If compilation fails (due to remaining GLSL incompatibilities),
+          // substitute a minimal no-op shader to prevent abort().
+          var origCompileShader = ctx.compileShader.bind(ctx);
+          ctx.compileShader = function(shader) {
+            origCompileShader(shader);
+            if (!ctx.getShaderParameter(shader, ctx.COMPILE_STATUS)) {
+              var log = ctx.getShaderInfoLog(shader);
+              var type = ctx.getShaderParameter(shader, ctx.SHADER_TYPE);
+              console.warn('[flycast-wasm] Shader compile failed, substituting fallback. Log:', log);
+              var fallback;
+              if (type === ctx.VERTEX_SHADER) {
+                fallback = '#version 300 es\nin vec3 VertexCoord;\nuniform float time;\nvoid main() { gl_Position = vec4(0.0); }\n';
+              } else {
+                fallback = '#version 300 es\nprecision mediump float;\nout vec4 FragColor;\nvoid main() { FragColor = vec4(0.0, 0.0, 0.0, 0.0); }\n';
+              }
+              origShaderSource(shader, fallback);
+              origCompileShader(shader);
+            }
+          };
+        }
+        return ctx;
+      };
+    })();
+  </script>
+
+  <!-- Main application -->
+  <script>
+    // Core options (from config/dreamcast-core-options.json)
+    var CORE_OPTIONS = {
+      'reicast_boot_to_bios': 'disabled',
+      'reicast_hle_bios': 'disabled',
+      'reicast_threaded_rendering': 'disabled',
+      'reicast_synchronous_rendering': 'disabled',
+      'reicast_internal_resolution': '640x480',
+      'reicast_mipmapping': 'disabled',
+      'reicast_anisotropic_filtering': '1',
+      'reicast_texupscale': 'disabled',
+      'reicast_enable_rttb': 'disabled',
+      'reicast_enable_purupuru': 'disabled',
+      'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
+      'reicast_delay_frame_swapping': 'disabled',
+      'reicast_frame_skipping': 'enabled',
+      'reicast_framerate': 'normal'
+    };
+
+    var CORE_OPTIONS_STR = Object.keys(CORE_OPTIONS).map(function(k) {
+      return k + ' = "' + CORE_OPTIONS[k] + '"';
+    }).join('\n') + '\n';
+
+    // ── IndexedDB storage layer ──
+
+    var DB_NAME = 'flycast-wasm';
+    var DB_VERSION = 1;
+
+    function openDB() {
+      return new Promise(function(resolve, reject) {
+        var req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = function() {
+          var db = req.result;
+          if (!db.objectStoreNames.contains('bios')) db.createObjectStore('bios');
+          if (!db.objectStoreNames.contains('roms')) db.createObjectStore('roms');
+        };
+        req.onsuccess = function() { resolve(req.result); };
+        req.onerror = function() { reject(req.error); };
+      });
+    }
+
+    var CHUNK_SIZE = 256 * 1024 * 1024; // 256MB — well under browser's ~1GB per-value limit
+
+    function dbPut(store, key, value) {
+      return openDB().then(function(db) {
+        return new Promise(function(resolve, reject) {
+          var tx = db.transaction(store, 'readwrite');
+          var os = tx.objectStore(store);
+          if (value instanceof ArrayBuffer && value.byteLength > CHUNK_SIZE) {
+            var numChunks = Math.ceil(value.byteLength / CHUNK_SIZE);
+            os.put({ __chunked: true, chunks: numChunks, totalSize: value.byteLength }, key);
+            for (var i = 0; i < numChunks; i++) {
+              var start = i * CHUNK_SIZE;
+              os.put(value.slice(start, Math.min(start + CHUNK_SIZE, value.byteLength)), key + '__chunk_' + i);
+            }
+          } else {
+            os.put(value, key);
+          }
+          tx.oncomplete = function() { db.close(); resolve(); };
+          tx.onerror = function() { db.close(); reject(tx.error); };
+        });
+      });
+    }
+
+    function dbGet(store, key) {
+      return openDB().then(function(db) {
+        return new Promise(function(resolve, reject) {
+          var tx = db.transaction(store, 'readonly');
+          var os = tx.objectStore(store);
+          var r = os.get(key);
+          r.onsuccess = function() {
+            var result = r.result;
+            if (!result || !result.__chunked) {
+              db.close();
+              resolve(result);
+              return;
+            }
+            var numChunks = result.chunks;
+            var totalSize = result.totalSize;
+            var chunks = new Array(numChunks);
+            var remaining = numChunks;
+            for (var i = 0; i < numChunks; i++) {
+              (function(idx) {
+                var cr = os.get(key + '__chunk_' + idx);
+                cr.onsuccess = function() {
+                  chunks[idx] = cr.result;
+                  if (--remaining === 0) {
+                    var assembled = new Uint8Array(totalSize);
+                    var offset = 0;
+                    for (var j = 0; j < numChunks; j++) {
+                      assembled.set(new Uint8Array(chunks[j]), offset);
+                      offset += chunks[j].byteLength;
+                    }
+                    db.close();
+                    resolve(assembled.buffer);
+                  }
+                };
+              })(i);
+            }
+          };
+          r.onerror = function() { db.close(); reject(r.error); };
+        });
+      });
+    }
+
+    function dbDelete(store, key) {
+      return openDB().then(function(db) {
+        return new Promise(function(resolve, reject) {
+          var tx = db.transaction(store, 'readwrite');
+          var os = tx.objectStore(store);
+          var r = os.get(key);
+          r.onsuccess = function() {
+            var result = r.result;
+            os.delete(key);
+            if (result && result.__chunked) {
+              for (var i = 0; i < result.chunks; i++) {
+                os.delete(key + '__chunk_' + i);
+              }
+            }
+          };
+          tx.oncomplete = function() { db.close(); resolve(); };
+          tx.onerror = function() { db.close(); reject(tx.error); };
+        });
+      });
+    }
+
+    function dbAllKeys(store) {
+      return openDB().then(function(db) {
+        return new Promise(function(resolve, reject) {
+          var tx = db.transaction(store, 'readonly');
+          var r = tx.objectStore(store).getAllKeys();
+          r.onsuccess = function() {
+            db.close();
+            resolve(r.result.filter(function(k) {
+              return typeof k !== 'string' || k.indexOf('__chunk_') === -1;
+            }));
+          };
+          r.onerror = function() { db.close(); reject(r.error); };
+        });
+      });
+    }
+
+    // ── Multi-file ROM parsers ──
+
+    function parseCueFiles(cueText) {
+      var files = [];
+      var lines = cueText.split('\n');
+      for (var i = 0; i < lines.length; i++) {
+        var match = lines[i].match(/^\s*FILE\s+"([^"]+)"/i);
+        if (match) files.push(match[1]);
+      }
+      return files;
+    }
+
+    function parseGdiFiles(gdiText) {
+      var files = [];
+      var lines = gdiText.trim().split('\n');
+      for (var i = 1; i < lines.length; i++) {
+        var parts = lines[i].trim().split(/\s+/);
+        if (parts.length >= 5) files.push(parts[4]);
+      }
+      return files;
+    }
+
+    // ── UI helpers ──
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function setStatus(msg) {
+      document.getElementById('status-msg').textContent = msg;
+    }
+
+    async function refreshUI() {
+      var bootBuf = await dbGet('bios', 'dc_boot.bin');
+      var flashBuf = await dbGet('bios', 'dc_flash.bin');
+      var hasBoot = !!bootBuf;
+      var hasFlash = !!flashBuf;
+
+      document.getElementById('boot-dot').className = 'dot ' + (hasBoot ? 'ok' : 'missing');
+      document.getElementById('flash-dot').className = 'dot ' + (hasFlash ? 'ok' : 'missing');
+      document.getElementById('boot-label').textContent = 'dc_boot.bin' + (hasBoot ? '' : ' (missing)');
+      document.getElementById('flash-label').textContent = 'dc_flash.bin' + (hasFlash ? '' : ' (missing)');
+
+      var romKeys = await dbAllKeys('roms');
+      var listEl = document.getElementById('rom-list');
+
+      if (romKeys.length === 0) {
+        listEl.innerHTML = '<p class="empty">No ROMs stored. Upload .chd, .cdi, .gdi, .cue, or .zip files.</p>';
+        return;
+      }
+
+      // Filter out companion track files from display:
+      // - .bin files that have a matching .cue (same base name or referenced inside a .cue)
+      // - .raw files (always GDI track data)
+      var cueNames = romKeys.filter(function(n) { return n.toLowerCase().endsWith('.cue'); });
+      var gdiNames = romKeys.filter(function(n) { return n.toLowerCase().endsWith('.gdi'); });
+      var companionSet = {};
+
+      // Parse stored .cue files to find referenced tracks
+      for (var ci = 0; ci < cueNames.length; ci++) {
+        var cueBuf = await dbGet('roms', cueNames[ci]);
+        if (cueBuf) {
+          var refs = parseCueFiles(new TextDecoder().decode(cueBuf));
+          for (var ri = 0; ri < refs.length; ri++) companionSet[refs[ri].toLowerCase()] = true;
+        }
+      }
+      // Parse stored .gdi files to find referenced tracks
+      for (var gi = 0; gi < gdiNames.length; gi++) {
+        var gdiBuf = await dbGet('roms', gdiNames[gi]);
+        if (gdiBuf) {
+          var refs = parseGdiFiles(new TextDecoder().decode(gdiBuf));
+          for (var ri = 0; ri < refs.length; ri++) companionSet[refs[ri].toLowerCase()] = true;
+        }
+      }
+
+      var displayRoms = romKeys.filter(function(name) {
+        var ext = name.split('.').pop().toLowerCase();
+        if (ext === 'raw') return false;
+        if (companionSet[name.toLowerCase()]) return false;
+        // Fallback: hide .bin if a .cue with same base name exists
+        if (ext === 'bin' && cueNames.some(function(c) {
+          return c.replace(/\.cue$/i, '').toLowerCase() === name.replace(/\.bin$/i, '').toLowerCase();
+        })) return false;
+        return true;
+      });
+
+      if (displayRoms.length === 0) {
+        listEl.innerHTML = '<p class="empty">Only track data files stored. Upload a .cue, .gdi, .chd, or other main ROM file.</p>';
+        return;
+      }
+
+      listEl.innerHTML = displayRoms.map(function(name) {
+        return '<div class="game-card" data-name="' + escapeHtml(name) + '">'
+          + '<div class="game-icon">&#9654;</div>'
+          + '<div class="game-name">' + escapeHtml(name) + '</div>'
+          + '<button class="delete-btn" title="Delete">&#10005;</button>'
+          + '</div>';
+      }).join('');
+    }
+
+    // ── File upload handlers ──
+
+    async function handleBiosUpload(e) {
+      var files = e.target.files;
+      if (!files.length) return;
+      setStatus('Storing BIOS files...');
+      for (var i = 0; i < files.length; i++) {
+        var name = files[i].name.toLowerCase();
+        if (name === 'dc_boot.bin' || name === 'dc_flash.bin') {
+          var buf = await files[i].arrayBuffer();
+          await dbPut('bios', name, buf);
+        }
+      }
+      e.target.value = '';
+      setStatus('');
+      refreshUI();
+    }
+
+    async function handleRomUpload(e) {
+      var files = e.target.files;
+      if (!files.length) return;
+      setStatus('Storing ROM' + (files.length > 1 ? 's' : '') + '...');
+      for (var i = 0; i < files.length; i++) {
+        var buf = await files[i].arrayBuffer();
+        await dbPut('roms', files[i].name, buf);
+      }
+      e.target.value = '';
+      setStatus('');
+      refreshUI();
+    }
+
+    async function deleteRom(name) {
+      await dbDelete('roms', name);
+      refreshUI();
+    }
+
+    // ── ROM list click delegation ──
+
+    document.getElementById('rom-list').addEventListener('click', function(e) {
+      var card = e.target.closest('.game-card');
+      if (!card) return;
+      var name = card.dataset.name;
+      if (e.target.closest('.delete-btn')) {
+        deleteRom(name);
+      } else {
+        launchGame(name);
+      }
+    });
+
+    // ── Game launcher ──
+
+    async function launchGame(romName) {
+      var bootBuf = await dbGet('bios', 'dc_boot.bin');
+      var flashBuf = await dbGet('bios', 'dc_flash.bin');
+
+      if (!bootBuf || !flashBuf) {
+        alert('BIOS files missing. Upload dc_boot.bin and dc_flash.bin first.');
+        return;
+      }
+
+      var romBuf = await dbGet('roms', romName);
+      if (!romBuf) {
+        alert('ROM not found in storage.');
+        return;
+      }
+
+      setStatus('Loading...');
+
+      // Load companion files for multi-file ROMs (.cue/.gdi)
+      var companionFiles = {};
+      var romExt = romName.split('.').pop().toLowerCase();
+
+      if (romExt === 'cue' || romExt === 'gdi') {
+        var romText = new TextDecoder().decode(romBuf);
+        var fileRefs = romExt === 'cue' ? parseCueFiles(romText) : parseGdiFiles(romText);
+        var allKeys = await dbAllKeys('roms');
+
+        for (var fi = 0; fi < fileRefs.length; fi++) {
+          // Try exact match, then case-insensitive fallback
+          var refName = fileRefs[fi];
+          var buf = await dbGet('roms', refName);
+          if (!buf) {
+            var lower = refName.toLowerCase();
+            for (var ki = 0; ki < allKeys.length; ki++) {
+              if (allKeys[ki].toLowerCase() === lower) {
+                buf = await dbGet('roms', allKeys[ki]);
+                break;
+              }
+            }
+          }
+          if (buf) {
+            companionFiles[refName] = buf;
+          } else {
+            console.warn('[flycast-wasm] Companion file not found:', refName);
+          }
+        }
+      }
+
+      // Create Blob URLs for EmulatorJS
+      var romBlobUrl = URL.createObjectURL(new Blob([romBuf]));
+      var biosBlobUrl = URL.createObjectURL(new Blob([bootBuf]));
+
+      // Set EmulatorJS globals
+      window.EJS_DEBUG_XX = false;
+      window.EJS_player = '#game';
+      window.EJS_core = 'flycast';
+      window.EJS_gameUrl = romBlobUrl;
+      window.EJS_biosUrl = biosBlobUrl;
+      window.EJS_gameName = romName;  // preserves extension so Flycast identifies disc format
+      window.EJS_pathtodata = 'data/';
+      window.EJS_startOnLoaded = true;
+      window.EJS_color = '#fe8019';
+      window.EJS_disableLocalStorage = true;
+      window.EJS_defaultOptions = CORE_OPTIONS;
+
+      // Install the startGame patch with BIOS data + companion files in closure
+      installStartGamePatch(bootBuf, flashBuf, companionFiles);
+
+      // Switch views
+      document.getElementById('launcher').style.display = 'none';
+      var gameEl = document.getElementById('game');
+      gameEl.style.display = 'block';
+      document.body.style.overflow = 'hidden';
+
+      // Inject EmulatorJS loader
+      var script = document.createElement('script');
+      script.src = 'data/loader.js';
+      document.body.appendChild(script);
+    }
+
+    // ── startGame patch: BIOS placement + core options + system_directory ──
+    // Adapted from server.js — writes ArrayBuffers directly to Emscripten FS
+    // instead of fetching from server URLs.
+
+    function installStartGamePatch(bootBuf, flashBuf, companionFiles) {
+      var CORE_OPTS = CORE_OPTIONS_STR;
+      var BIOS_FILES = ['dc_boot.bin', 'dc_flash.bin'];
+
+      var iv = setInterval(function() {
+        var emu = window.EJS_emulator;
+        if (!emu || emu.__flycastPatched) return;
+        emu.__flycastPatched = true;
+        clearInterval(iv);
+
+        var origStartGame = emu.startGame;
+        emu.startGame = async function() {
+          try {
+            if (this.gameManager && this.gameManager.FS) {
+              var FS = this.gameManager.FS;
+
+              // 0. Write companion files for multi-file ROMs (.cue/.gdi tracks)
+              var companionNames = Object.keys(companionFiles || {});
+              for (var c = 0; c < companionNames.length; c++) {
+                try {
+                  FS.writeFile('/' + companionNames[c], new Uint8Array(companionFiles[companionNames[c]]));
+                  console.log('[flycast-wasm] Wrote companion:', companionNames[c]);
+                } catch(e) {
+                  console.error('[flycast-wasm] Failed to write companion:', companionNames[c], e);
+                }
+              }
+
+              // 1. Write dc_flash.bin directly from closure (no fetch needed)
+              try {
+                FS.writeFile('/dc_flash.bin', new Uint8Array(flashBuf));
+              } catch(e) {
+                console.error('[flycast-wasm] Failed to write dc_flash.bin:', e);
+              }
+
+              // 2. Ensure dc_boot.bin exists (EmulatorJS places it via EJS_biosUrl,
+              //    but write from closure as fallback)
+              try {
+                if (!FS.analyzePath('/dc_boot.bin').exists) {
+                  FS.writeFile('/dc_boot.bin', new Uint8Array(bootBuf));
+                }
+              } catch(e) {}
+
+              // 3. Create /dc/ and copy BIOS files there
+              var biosDir = '/dc';
+              try {
+                if (!FS.analyzePath(biosDir).exists) FS.mkdir(biosDir);
+              } catch(e) {}
+              for (var j = 0; j < BIOS_FILES.length; j++) {
+                var src = '/' + BIOS_FILES[j];
+                var dst = biosDir + '/' + BIOS_FILES[j];
+                try {
+                  if (FS.analyzePath(src).exists && !FS.analyzePath(dst).exists) {
+                    var data = FS.readFile(src);
+                    FS.writeFile(dst, data);
+                  }
+                } catch(e) {}
+              }
+
+              // 4. Write core options before callMain
+              if (this.Module && this.Module.callbacks) {
+                var origCb = this.Module.callbacks.setupCoreSettingFile;
+                this.Module.callbacks.setupCoreSettingFile = function(filePath) {
+                  try { FS.writeFile(filePath, CORE_OPTS); } catch(e) {}
+                  if (origCb) origCb(filePath);
+                };
+              }
+
+              // 5. Set system_directory in retroarch.cfg
+              var cfgPath = '/home/web_user/.config/retroarch/retroarch.cfg';
+              try {
+                var cfg = new TextDecoder().decode(FS.readFile(cfgPath));
+                if (cfg.indexOf('system_directory') === -1) {
+                  FS.writeFile(cfgPath, cfg + 'system_directory = "/"\n');
+                }
+              } catch(e) {}
+
+              // 6. Debug: verify BIOS placement
+              try {
+                var rootFiles = FS.readdir('/').filter(function(f) { return f !== '.' && f !== '..'; });
+                console.log('[flycast-wasm] / contains:', rootFiles.join(', '));
+                if (FS.analyzePath('/dc').exists) {
+                  var dcFiles = FS.readdir('/dc').filter(function(f) { return f !== '.' && f !== '..'; });
+                  console.log('[flycast-wasm] /dc/ contains:', dcFiles.join(', '));
+                } else {
+                  console.warn('[flycast-wasm] /dc/ does NOT exist!');
+                }
+              } catch(e) {}
+            }
+          } catch(e) {
+            console.error('[flycast-wasm] startGame patch failed:', e);
+          }
+          return origStartGame.apply(this, arguments);
+        };
+      }, 50);
+    }
+
+    // ── Init ──
+
+    document.getElementById('bios-input').addEventListener('change', handleBiosUpload);
+    document.getElementById('rom-input').addEventListener('change', handleRomUpload);
+    refreshUI();
+  </script>
+
+</body>
+</html>
