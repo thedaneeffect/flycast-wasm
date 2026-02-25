@@ -38,6 +38,37 @@ Download `flycast-wasm.data` from [Releases](../../releases) and place it in Emu
 
 See [Phase 10-11 of the technical writeup](TECHNICAL_WRITEUP.md#phase-10-runtime-webgl2-patches) for integration details.
 
+### Static Deployment (Cloudflare Pages)
+
+`demo/index.html` is a self-contained SPA that runs entirely client-side — no server required. Users upload their own BIOS and ROM files through the browser, persisted in IndexedDB.
+
+**Setup:**
+
+1. Download [EmulatorJS 4.2.3](https://github.com/EmulatorJS/EmulatorJS/releases/tag/v4.2.3) and copy the runtime files into `demo/data/`:
+   - `loader.js`, `emulator.min.js`, `emulator.min.css`, `version.json`
+   - `compression/` directory (extract7z, extractzip, libunrar)
+   - `localization/` directory (optional, for non-English languages)
+
+2. Download `flycast-wasm.data` from [Releases](../../releases) and place it in `demo/data/cores/`
+
+3. Create `demo/data/cores/reports/flycast.json`:
+   ```json
+   { "core": "flycast", "buildStart": "2026-02-20T17:43:28+00:00", "buildEnd": "2026-02-20T17:43:28+00:00", "options": { "defaultWebGL2": true } }
+   ```
+
+4. Add `flycast` to the `requiresWebGL2` array in `demo/data/emulator.min.js`
+
+5. Deploy the `demo/` directory to any static host with cross-origin isolation headers. For Cloudflare Pages:
+   ```bash
+   npx wrangler pages deploy demo --project-name=flycast
+   ```
+   The included `demo/_headers` file configures the required COEP/COOP/CORP headers automatically.
+
+**Additional WebGL2 patches** beyond the original three (in `patches/webgl2-compat.js`):
+- **Patch D** — `shaderSource` rewrite: `#version 130` → `#version 300 es` for RetroArch menu shaders
+- **Patch E** — `compileShader` fallback: substitutes no-op shaders when compilation fails (menu shaders only; game shaders use correct `#version 300 es`)
+- **Patch F** — `texImage2D` internalformat fix: `GL_RED` (0x1903) → `GL_R8` (0x8229) for WebGL2
+
 ### Build From Source
 
 Requires WSL2/Linux and Emscripten SDK 3.1.74. Full instructions in the [technical writeup](TECHNICAL_WRITEUP.md#phase-1-clone-repositories).
@@ -99,6 +130,8 @@ flycast-wasm/
 │   ├── build.json                      # EmulatorJS build metadata
 │   └── dreamcast-core-options.json     # Tuned core options for WASM
 ├── demo/
+│   ├── index.html                      # Static SPA (Cloudflare Pages / any static host)
+│   ├── _headers                        # Cloudflare Pages COEP/COOP/CORP headers
 │   └── server.js                       # Standalone demo server (Node.js)
 └── screenshots/                        # BIOS boot, gameplay captures
 ```
