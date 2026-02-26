@@ -332,7 +332,7 @@
       'reicast_hle_bios': 'disabled',
       'reicast_threaded_rendering': 'disabled',
       'reicast_synchronous_rendering': 'disabled',
-      'reicast_internal_resolution': '640x480',
+      'reicast_internal_resolution': '320x240',
       'reicast_mipmapping': 'disabled',
       'reicast_anisotropic_filtering': '1',
       'reicast_texupscale': 'disabled',
@@ -341,7 +341,9 @@
       'reicast_alpha_sorting': 'per-strip (fast, least accurate)',
       'reicast_delay_frame_swapping': 'disabled',
       'reicast_frame_skipping': 'enabled',
-      'reicast_framerate': 'normal'
+      'reicast_framerate': 'normal',
+      'reicast_enable_dsp': 'disabled',
+      'reicast_gdrom_fast_loading': 'enabled'
     };
 
     var CORE_OPTIONS_STR = Object.keys(CORE_OPTIONS).map(function(k) {
